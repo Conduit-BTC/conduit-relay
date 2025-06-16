@@ -16,10 +16,13 @@ jobs:
         run: |
           git config --global user.name "railway-deploy-bot"
           git config --global user.email "bot@railway.app"
+          git submodule update --init --recursive
           for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
             echo "Flattening submodule: $dir"
+            # Remove old placeholder (if any)
             rm -rf "$dir"
-            cp -R "$dir" "$dir"
+            # Copy actual submodule contents
+            cp -R "./$dir" "$dir"
           done
 
       - name: Clean submodule metadata
