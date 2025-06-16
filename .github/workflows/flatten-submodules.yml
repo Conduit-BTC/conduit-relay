@@ -1,0 +1,33 @@
+name: Flatten Submodules to Deploy
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  flatten-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Flatten submodules
+        run: |
+          git config --global user.name "railway-deploy-bot"
+          git config --global user.email "bot@railway.app"
+
+          # Remove submodule metadata
+          rm -f .gitmodules
+          git submodule deinit -f .
+          git rm --cached -r .
+
+          # Re-add the real contents
+          git add .
+          git commit -m "Flatten submodules for deploy" || echo "Nothing to commit"
+
+      - name: Push to deploy branch
+        run: |
+          git push -f origin HEAD:deploy
