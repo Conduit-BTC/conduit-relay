@@ -26,7 +26,6 @@ RUN \
     libsecp256k1-dev \
     zstd-dev \
   && rm -rf /var/cache/apk/* \
-  && git submodule update --init \
   && make setup-golpe \
   && make -j4
 
