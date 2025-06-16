@@ -65,7 +65,7 @@ jobs:
 
       - name: Build and push Docker image
         run: |
-          echo "LOWER_REPO=${LOWER_REPO,,}" >> $GITHUB_ENV
+          echo "LOWER_REPO=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
           docker buildx build \
             -t ghcr.io/${{ env.LOWER_REPO }}/strfry:latest \
             --platform linux/amd64,linux/arm64 \
