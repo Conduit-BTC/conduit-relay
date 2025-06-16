@@ -3,7 +3,7 @@
 
 FROM alpine:3.18.3 AS build
 
-ENV TZ=Europe/London
+ENV TZ=America/LosAngeles
 
 WORKDIR /build
 
