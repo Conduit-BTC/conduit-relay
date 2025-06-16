@@ -14,17 +14,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Flatten submodules
+      - name: Copy submodule contents
         run: |
           git config --global user.name "railway-deploy-bot"
           git config --global user.email "bot@railway.app"
 
-          # Remove submodule metadata
-          rm -f .gitmodules
-          git submodule deinit -f .
-          git rm --cached -r .
+          # Copy each submodule’s contents into the working tree
+          for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
+            echo "Flattening submodule: $dir"
+            rm -rf "$dir"
+            cp -R ".git/modules/$dir" "$dir"
+          done
 
-          # Re-add the real contents
+      - name: Remove submodule metadata
+        run: |
+          git submodule deinit -f .
+          rm -rf .gitmodules .git/modules
           git add .
           git commit -m "Flatten submodules for deploy" || echo "Nothing to commit"
 
