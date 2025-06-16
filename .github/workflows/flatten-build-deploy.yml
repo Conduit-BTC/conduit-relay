@@ -4,9 +4,6 @@ on:
   push:
     branches: [master]
 
-env:
-  LOWER_REPO: ${{ github.repository_owner }}
-
 jobs:
   flatten:
     runs-on: ubuntu-latest
@@ -63,9 +60,12 @@ jobs:
       - uses: docker/setup-qemu-action@v1
       - uses: docker/setup-buildx-action@v1
 
-      - name: Build and push Docker image
+      - name: Set lowercase image repo
         run: |
           echo "LOWER_REPO=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build and push Docker image
+        run: |
           docker buildx build \
             -t ghcr.io/${{ env.LOWER_REPO }}/strfry:latest \
             --platform linux/amd64,linux/arm64 \
