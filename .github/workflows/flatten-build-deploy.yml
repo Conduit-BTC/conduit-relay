@@ -1,0 +1,82 @@
+name: Flatten, Build, and Deploy
+
+on:
+  push:
+    branches: [master]
+
+env:
+  LOWER_REPO: ${{ github.repository_owner }}
+
+jobs:
+  flatten:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Flatten submodules
+        run: |
+          git config --global user.name "railway-deploy-bot"
+          git config --global user.email "bot@railway.app"
+          git submodule update --init --recursive
+
+          for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
+            echo "Flattening submodule: $dir"
+            mkdir -p "$(dirname "/tmp/$dir")"
+            cp -R "$dir" "/tmp/$dir"
+            rm -rf "$dir"
+            mv "/tmp/$dir" "$dir"
+          done
+
+      - name: Clean submodule metadata
+        run: |
+          git submodule deinit -f .
+          rm -rf .gitmodules .git/modules
+          git add .
+          git commit -m "Flatten submodules for build" || echo "Nothing to commit"
+
+      - name: Push to build branch (requires PAT)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}
+          git push -f origin HEAD:build
+
+  build:
+    needs: flatten
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: build
+          fetch-depth: 0
+
+      - uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@v1
+      - uses: docker/setup-buildx-action@v1
+
+      - name: Build and push Docker image
+        run: |
+          echo "LOWER_REPO=${LOWER_REPO,,}" >> $GITHUB_ENV
+          docker buildx build \
+            -t ghcr.io/${{ env.LOWER_REPO }}/strfry:latest \
+            --platform linux/amd64,linux/arm64 \
+            --push .
+
+      - name: Push working tree to deploy branch (for Railway)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git config --global user.name "railway-deploy-bot"
+          git config --global user.email "bot@railway.app"
+          git checkout -B deploy
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}
+          git push -f origin deploy
