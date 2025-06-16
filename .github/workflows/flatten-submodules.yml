@@ -1,4 +1,4 @@
-name: Flatten Submodules to Deploy
+name: Flatten Submodules to Build Branch
 
 on:
   push:
@@ -7,32 +7,28 @@ on:
 jobs:
   flatten-and-push:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Copy submodule contents
+      - name: Flatten submodules
         run: |
           git config --global user.name "railway-deploy-bot"
           git config --global user.email "bot@railway.app"
-
-          # Copy each submodule’s contents into the working tree
           for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
             echo "Flattening submodule: $dir"
             rm -rf "$dir"
-            cp -R ".git/modules/$dir" "$dir"
+            cp -R "$dir" "$dir"
           done
 
-      - name: Remove submodule metadata
+      - name: Clean submodule metadata
         run: |
           git submodule deinit -f .
           rm -rf .gitmodules .git/modules
           git add .
-          git commit -m "Flatten submodules for deploy" || echo "Nothing to commit"
+          git commit -m "Flatten submodules for build" || echo "Nothing to commit"
 
-      - name: Push to deploy branch
+      - name: Push to build branch
         run: |
-          git push -f origin HEAD:deploy
+          git push -f origin HEAD:build
