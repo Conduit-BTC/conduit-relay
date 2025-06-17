@@ -21,17 +21,19 @@ jobs:
 
           for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
             echo "Flattening submodule: $dir"
+
             mkdir -p "$(dirname "/tmp/$dir")"
             cp -R "$dir" "/tmp/$dir"
+
+            git rm --cached "$dir"
             rm -rf "$dir"
             mv "/tmp/$dir" "$dir"
+            git add "$dir"
           done
 
-      - name: Clean submodule metadata
-        run: |
           git submodule deinit -f .
           rm -rf .gitmodules .git/modules
-          git add .
+
           git commit -m "Flatten submodules for build" || echo "Nothing to commit"
 
       - name: Push to build branch (requires PAT)
