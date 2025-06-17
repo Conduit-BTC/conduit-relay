@@ -17,6 +17,8 @@ jobs:
         run: |
           git config --global user.name "railway-deploy-bot"
           git config --global user.email "bot@railway.app"
+          git checkout -B build  # ensure we're on a local build branch
+
           git submodule update --init --recursive
 
           for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
@@ -41,7 +43,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}
-          git push -f origin HEAD:build
+          git push -f origin build
 
   build:
     needs: flatten
