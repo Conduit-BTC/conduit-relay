@@ -17,16 +17,17 @@ jobs:
         run: |
           git config --global user.name "railway-deploy-bot"
           git config --global user.email "bot@railway.app"
-          git checkout -B build  # ensure we're on a local build branch
+
+          # Make sure we're on a local build branch (not detached HEAD)
+          git fetch origin
+          git checkout -B build origin/master
 
           git submodule update --init --recursive
 
           for dir in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
             echo "Flattening submodule: $dir"
-
             mkdir -p "$(dirname "/tmp/$dir")"
             cp -R "$dir" "/tmp/$dir"
-
             git rm --cached "$dir"
             rm -rf "$dir"
             mv "/tmp/$dir" "$dir"
@@ -36,6 +37,7 @@ jobs:
           git submodule deinit -f .
           rm -rf .gitmodules .git/modules
 
+          git add .
           git commit -m "Flatten submodules for build" || echo "Nothing to commit"
 
       - name: Push to build branch (requires PAT)
