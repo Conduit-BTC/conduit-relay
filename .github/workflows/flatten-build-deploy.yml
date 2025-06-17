@@ -35,6 +35,9 @@ jobs:
             git add -f "$dir"
           done
 
+          ls -lah golpe
+          test -f golpe/rules.mk && echo "✅ rules.mk present before commit" || echo "❌ rules.mk missing before commit"
+
           git submodule deinit -f .
           rm -rf .gitmodules .git/modules
 
@@ -58,11 +61,11 @@ jobs:
           ref: build
           fetch-depth: 0
 
-      - name: Confirm golpe/rules.mk exists before Docker build
+      - name: Ensure golpe/rules.mk is in checkout
         run: |
-          echo "Checking golpe contents..."
-          ls -lah golpe || echo "❌ golpe/ not found"
-          test -f golpe/rules.mk && head -n 10 golpe/rules.mk || echo "❌ golpe/rules.mk missing"
+          echo "::info:: Listing golpe/"
+          ls -lah golpe || (echo "❌ Missing golpe dir" && exit 1)
+          test -f golpe/rules.mk && echo "✅ Found rules.mk" || (echo "❌ Missing rules.mk" && exit 1)
 
       - uses: docker/login-action@v1
         with:
