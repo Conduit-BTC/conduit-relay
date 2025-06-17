@@ -31,7 +31,8 @@ jobs:
             git rm --cached "$dir"
             rm -rf "$dir"
             mv "/tmp/$dir" "$dir"
-            git add "$dir"
+            ls -lah golpe && test -f golpe/rules.mk && echo "✅ rules.mk found" || echo "❌ rules.mk MISSING"
+            git add -f "$dir"
           done
 
           git submodule deinit -f .
