@@ -51,11 +51,13 @@ nak event --sec "$NOSTR_SECRET_KEY" -k 30402 -d banana -c '{"title":"Banana","su
 nak event --sec "$NOSTR_SECRET_KEY" -k 30402 -d carrot -c '{"title":"Carrot","summary":"Orange root","price":12,"currency":"USD","updatedAt":1002}' ws://127.0.0.1:3334
 ```
 
-4) Query products with Scope 2 sort:
+4) Query products with deterministic Scope 2 sort:
 
 ```bash
 nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc' ws://127.0.0.1:3334
 ```
+
+Price sorting is only allowed when the matched products are comparable. Mixed-currency results require either trusted normalization or `partial=1`.
 
 5) Query products with text search:
 
@@ -63,13 +65,21 @@ nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc' ws://127.0.0.1:33
 nak req -k 30402 -l 10 --search 'conduit-l2:q=apple;sort=newest' ws://127.0.0.1:3334
 ```
 
-6) Show protected read behavior for `kind:1059`:
+6) Query a mixed-currency set with deterministic partial results:
+
+```bash
+nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc;partial=1' ws://127.0.0.1:3334
+```
+
+7) Show protected read behavior for `kind:1059`:
 
 ```bash
 nak req -k 1059 ws://127.0.0.1:3334
 ```
 
 Without NIP-42 auth, this should return an `auth-required` closure.
+
+Deleted product revisions are filtered out of accelerated browse results. This package currently advertises browse/search/sort behavior plus protected `kind:1059` gating; it does not advertise separate product-detail or profile-lookup acceleration.
 
 ## One-command demo and validation
 

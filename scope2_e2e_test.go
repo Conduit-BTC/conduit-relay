@@ -3,6 +3,7 @@ package conduitl2
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,6 +75,48 @@ func TestScope2E2E_ProductBrowseSortAndCursor(t *testing.T) {
 	require.Equal(t, e1.ID, page2[0].ID)
 }
 
+func TestScope2E2E_ProductBrowseOmitsDeletedLatestRevision(t *testing.T) {
+	relay := khatru.NewRelay()
+	store := &slicestore.SliceStore{}
+	require.NoError(t, store.Init())
+	relay.UseEventstore(store, 500)
+
+	base := relay.QueryStored
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+
+	srv := httptest.NewServer(relay)
+	defer srv.Close()
+
+	url := "ws" + srv.URL[4:]
+	client, err := nostr.RelayConnect(t.Context(), url, nostr.RelayOptions{})
+	require.NoError(t, err)
+	defer client.Close()
+
+	sk := nostr.Generate()
+	product := productEvent(t, sk, 1000, "apple", `{"title":"Apple","summary":"Fresh","price":19,"currency":"USD","updatedAt":1000}`)
+	deleteEvt := deleteEventForProduct(t, sk, 1001, product)
+
+	ctxPub, cancelPub := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelPub()
+	require.NoError(t, client.Publish(ctxPub, product))
+	require.NoError(t, client.Publish(ctxPub, deleteEvt))
+
+	ctxSub, cancelSub := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelSub()
+
+	sub, err := client.Subscribe(ctxSub, nostr.Filter{
+		Kinds:  []nostr.Kind{30402},
+		Limit:  10,
+		Search: "conduit-l2:q=apple;sort=newest",
+	}, nostr.SubscriptionOptions{})
+	require.NoError(t, err)
+	defer sub.Unsub()
+
+	page := collectUntilEOSE(t, sub, 5*time.Second)
+	require.Empty(t, page)
+}
+
 func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 	relay := khatru.NewRelay()
 	store := &slicestore.SliceStore{}
@@ -100,14 +143,25 @@ func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 	require.True(t, ok)
 
 	containsConduitL2 := false
+	containsProductDetail := false
+	containsProfileLookup := false
 	for _, tag := range tagsRaw {
 		tagStr, ok := tag.(string)
-		if ok && tagStr == "conduit_l2" {
+		if !ok {
+			continue
+		}
+		switch tagStr {
+		case "conduit_l2":
 			containsConduitL2 = true
-			break
+		case "product_detail_resolution":
+			containsProductDetail = true
+		case "profile_decoration_lookup":
+			containsProfileLookup = true
 		}
 	}
 	require.True(t, containsConduitL2)
+	require.False(t, containsProductDetail)
+	require.False(t, containsProfileLookup)
 
 	url := "ws" + srv.URL[4:]
 	unauth, err := nostr.RelayConnect(t.Context(), url, nostr.RelayOptions{})
@@ -178,6 +232,18 @@ doneAuth:
 func productEvent(t *testing.T, sk nostr.SecretKey, createdAt int64, dTag, content string) nostr.Event {
 	t.Helper()
 	evt := nostr.Event{CreatedAt: nostr.Timestamp(createdAt), Kind: 30402, Tags: nostr.Tags{{"d", dTag}}, Content: content}
+	require.NoError(t, evt.Sign(sk))
+	return evt
+}
+
+func deleteEventForProduct(t *testing.T, sk nostr.SecretKey, createdAt int64, product nostr.Event) nostr.Event {
+	t.Helper()
+	address := fmt.Sprintf("%d:%s:%s", product.Kind, product.PubKey.Hex(), product.Tags.GetD())
+	evt := nostr.Event{
+		CreatedAt: nostr.Timestamp(createdAt),
+		Kind:      5,
+		Tags:      nostr.Tags{{"e", product.ID.Hex()}, {"a", address}},
+	}
 	require.NoError(t, evt.Sign(sk))
 	return evt
 }
