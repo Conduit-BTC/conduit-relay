@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/khatru"
@@ -35,8 +37,50 @@ type Scope2Options struct {
 
 type StoreQuery func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event]
 
+type productEnvelope struct {
+	Address    string
+	Event      nostr.Event
+	UpdatedAt  nostr.Timestamp
+	Price      float64
+	Currency   string
+	HasPrice   bool
+	SearchText string
+	Tombstoned bool
+}
+
+type searchPlan struct {
+	Sort    ProductSort
+	Text    string
+	Cursor  string
+	Partial bool
+}
+
+type cursorState struct {
+	ID string `json:"id"`
+}
+
+type pricePolicy struct {
+	Allowed         bool
+	PartialCurrency string
+	Reason          string
+}
+
+type scope2State struct {
+	mu       sync.RWMutex
+	products map[string]productEnvelope
+}
+
+var (
+	scope2RegistryMu sync.RWMutex
+	scope2Registry   = map[uintptr]*scope2State{}
+)
+
 func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 	withDefaults(&opts)
+
+	prevQuery := relay.QueryStored
+	state := newScope2State(prevQuery)
+	registerScope2State(prevQuery, state)
 
 	relay.Info.AddSupportedNIPs([]int{17, 59})
 	if opts.EnableNIP50 {
@@ -54,8 +98,6 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			"scope2-mvp",
 			"marketplace_product_browse",
 			"merchant_storefront_browse",
-			"product_detail_resolution",
-			"profile_decoration_lookup",
 			"sort:newest",
 			"sort:price_asc",
 			"sort:price_desc",
@@ -68,12 +110,28 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 		return info
 	}
 
-	prevQuery := relay.QueryStored
+	prevSaved := relay.OnEventSaved
+	relay.OnEventSaved = func(ctx context.Context, event nostr.Event) {
+		state.applyEvent(event)
+		if prevSaved != nil {
+			prevSaved(ctx, event)
+		}
+	}
+
+	prevDeleted := relay.OnEventDeleted
+	relay.OnEventDeleted = func(ctx context.Context, deleted nostr.Event) {
+		state.applyDeletedEvent(deleted)
+		if prevDeleted != nil {
+			prevDeleted(ctx, deleted)
+		}
+	}
+
 	if prevQuery != nil {
 		relay.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
 			applyRequestBounds(&filter, opts)
 			return prevQuery(ctx, filter)
 		}
+		registerScope2State(relay.QueryStored, state)
 	}
 
 	prevRequest := relay.OnRequest
@@ -94,21 +152,26 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			return true, "blocked: use conduit-l2 capability search format"
 		}
 
+		plan, hasPlan := parseSearchPlan(filter.Search)
+		if hasPlan && isProductQuery(filter) {
+			filter = filter.Clone()
+			applyRequestBounds(&filter, opts)
+			if _, reason := state.evaluate(filter, plan, opts); reason != "" {
+				return true, reason
+			}
+		}
+
 		return false, ""
 	}
 }
 
-func appendUnique(target []string, values ...string) []string {
-	for _, value := range values {
-		if !slices.Contains(target, value) {
-			target = append(target, value)
-		}
-	}
-	return target
-}
-
 func WrapProductQueries(baseQuery StoreQuery, opts Scope2Options) StoreQuery {
 	withDefaults(&opts)
+
+	state := lookupScope2State(baseQuery)
+	if state == nil {
+		state = newScope2State(baseQuery)
+	}
 
 	return func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
 		plan, hasPlan := parseSearchPlan(filter.Search)
@@ -116,47 +179,16 @@ func WrapProductQueries(baseQuery StoreQuery, opts Scope2Options) StoreQuery {
 			return baseQuery(ctx, filter)
 		}
 
-		base := filter.Clone()
-		base.Search = ""
-		base.LimitZero = false
-		base.Limit = opts.MaxProjectionScan
+		filter = filter.Clone()
+		applyRequestBounds(&filter, opts)
 
-		raw := make([]nostr.Event, 0, opts.MaxProjectionScan)
-		for evt := range baseQuery(ctx, base) {
-			if evt.Kind != 30402 {
-				continue
-			}
-			if plan.Text != "" {
-				title, summary := extractProductText(evt.Content)
-				needle := strings.ToLower(plan.Text)
-				if !strings.Contains(strings.ToLower(title), needle) && !strings.Contains(strings.ToLower(summary), needle) {
-					continue
-				}
-			}
-			raw = append(raw, evt)
-		}
-
-		products := dedupeLatestProducts(raw)
-		products = sortProducts(products, plan.Sort, opts.AllowMixedCurrencySort, plan.Partial)
-
-		start := 0
-		if plan.Cursor != "" {
-			start = findCursorStart(products, plan.Cursor)
-		}
-
-		if start >= len(products) {
+		products, reason := state.evaluate(filter, plan, opts)
+		if reason != "" {
 			return emptySeq()
 		}
 
-		limit := resolvedLimit(filter, opts)
-		end := start + limit
-		if end > len(products) {
-			end = len(products)
-		}
-		page := products[start:end]
-
 		return func(yield func(nostr.Event) bool) {
-			for _, pe := range page {
+			for _, pe := range products {
 				if !yield(pe.Event) {
 					return
 				}
@@ -174,19 +206,367 @@ func emptySeq() iter.Seq[nostr.Event] {
 	return func(yield func(nostr.Event) bool) {}
 }
 
-type productEnvelope struct {
-	Event     nostr.Event
-	UpdatedAt nostr.Timestamp
-	Price     float64
-	Currency  string
-	HasPrice  bool
+func newScope2State(baseQuery StoreQuery) *scope2State {
+	state := &scope2State{
+		products: make(map[string]productEnvelope),
+	}
+	state.seed(baseQuery)
+	return state
 }
 
-type searchPlan struct {
-	Sort    ProductSort
-	Text    string
-	Cursor  string
-	Partial bool
+func registerScope2State(query StoreQuery, state *scope2State) {
+	if query == nil || state == nil {
+		return
+	}
+
+	scope2RegistryMu.Lock()
+	scope2Registry[queryKey(query)] = state
+	scope2RegistryMu.Unlock()
+}
+
+func lookupScope2State(query StoreQuery) *scope2State {
+	if query == nil {
+		return nil
+	}
+
+	scope2RegistryMu.RLock()
+	state := scope2Registry[queryKey(query)]
+	scope2RegistryMu.RUnlock()
+	return state
+}
+
+func queryKey(query StoreQuery) uintptr {
+	return reflect.ValueOf(query).Pointer()
+}
+
+func (s *scope2State) seed(baseQuery StoreQuery) {
+	if baseQuery == nil {
+		return
+	}
+
+	events := make([]nostr.Event, 0, 128)
+	for evt := range baseQuery(context.Background(), nostr.Filter{Kinds: []nostr.Kind{30402, 5}}) {
+		if evt.Kind == 30402 || evt.Kind == 5 {
+			events = append(events, evt)
+		}
+	}
+
+	slices.SortFunc(events, compareSeedEvents)
+	for _, evt := range events {
+		s.applyEvent(evt)
+	}
+}
+
+func compareSeedEvents(a, b nostr.Event) int {
+	if a.CreatedAt < b.CreatedAt {
+		return -1
+	}
+	if a.CreatedAt > b.CreatedAt {
+		return 1
+	}
+	if a.Kind != b.Kind {
+		if a.Kind == 30402 {
+			return -1
+		}
+		if b.Kind == 30402 {
+			return 1
+		}
+	}
+	return strings.Compare(a.ID.Hex(), b.ID.Hex())
+}
+
+func (s *scope2State) applyEvent(evt nostr.Event) {
+	switch evt.Kind {
+	case 30402:
+		s.upsertProduct(evt)
+	case 5:
+		s.applyDeleteEvent(evt)
+	}
+}
+
+func (s *scope2State) upsertProduct(evt nostr.Event) {
+	pe := buildProductEnvelope(evt)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.products[pe.Address]
+	if ok && !eventBeatsCurrent(pe.Event, current.Event) {
+		return
+	}
+
+	pe.Tombstoned = false
+	s.products[pe.Address] = pe
+}
+
+func (s *scope2State) applyDeleteEvent(evt nostr.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, tag := range evt.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+
+		switch tag[0] {
+		case "e":
+			id, err := nostr.IDFromHex(tag[1])
+			if err != nil {
+				continue
+			}
+			for address, current := range s.products {
+				if current.Event.ID == id {
+					current.Tombstoned = true
+					s.products[address] = current
+				}
+			}
+		case "a":
+			address, ok := canonicalAddress(tag[1])
+			if !ok {
+				continue
+			}
+			current, ok := s.products[address]
+			if !ok {
+				continue
+			}
+			if current.Event.CreatedAt <= evt.CreatedAt {
+				current.Tombstoned = true
+				s.products[address] = current
+			}
+		}
+	}
+}
+
+func (s *scope2State) applyDeletedEvent(evt nostr.Event) {
+	if evt.Kind != 30402 {
+		return
+	}
+
+	address := productAddress(evt)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.products[address]
+	if !ok || current.Event.ID != evt.ID {
+		return
+	}
+
+	current.Tombstoned = true
+	s.products[address] = current
+}
+
+func (s *scope2State) evaluate(filter nostr.Filter, plan searchPlan, opts Scope2Options) ([]productEnvelope, string) {
+	products := s.matchProducts(filter, plan.Text)
+
+	policy := evaluatePricePolicy(products, plan, opts)
+	if !policy.Allowed {
+		return nil, policy.Reason
+	}
+
+	if policy.PartialCurrency != "" {
+		products = keepCurrencyCohort(products, policy.PartialCurrency)
+	}
+
+	slices.SortFunc(products, func(a, b productEnvelope) int {
+		return compareProducts(a, b, plan.Sort)
+	})
+
+	start := 0
+	if plan.Cursor != "" {
+		start = findCursorStart(products, plan.Cursor)
+	}
+	if start >= len(products) {
+		return nil, ""
+	}
+
+	end := start + resolvedLimit(filter, opts)
+	if end > len(products) {
+		end = len(products)
+	}
+	return products[start:end], ""
+}
+
+func (s *scope2State) matchProducts(filter nostr.Filter, text string) []productEnvelope {
+	base := filter.Clone()
+	base.Search = ""
+
+	needle := strings.ToLower(strings.TrimSpace(text))
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	products := make([]productEnvelope, 0, len(s.products))
+	for _, current := range s.products {
+		if current.Tombstoned {
+			continue
+		}
+		if !base.Matches(current.Event) {
+			continue
+		}
+		if needle != "" && !strings.Contains(current.SearchText, needle) {
+			continue
+		}
+		products = append(products, current)
+	}
+	return products
+}
+
+func buildProductEnvelope(evt nostr.Event) productEnvelope {
+	title, summary := extractProductText(evt.Content)
+	price, currency, hasPrice := extractPrice(evt.Content)
+
+	return productEnvelope{
+		Address:    productAddress(evt),
+		Event:      evt,
+		UpdatedAt:  extractUpdatedAt(evt),
+		Price:      price,
+		Currency:   currency,
+		HasPrice:   hasPrice,
+		SearchText: strings.ToLower(title + "\n" + summary),
+	}
+}
+
+func eventBeatsCurrent(next, current nostr.Event) bool {
+	if next.CreatedAt > current.CreatedAt {
+		return true
+	}
+	if next.CreatedAt < current.CreatedAt {
+		return false
+	}
+	return strings.Compare(next.ID.Hex(), current.ID.Hex()) < 0
+}
+
+func productAddress(evt nostr.Event) string {
+	if dTag := evt.Tags.GetD(); dTag != "" {
+		return fmt.Sprintf("%d:%s:%s", evt.Kind, evt.PubKey, dTag)
+	}
+	return evt.ID.Hex()
+}
+
+func canonicalAddress(raw string) (string, bool) {
+	parts := strings.SplitN(raw, ":", 3)
+	if len(parts) != 3 {
+		return "", false
+	}
+	kind, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return "", false
+	}
+	pubkey, err := nostr.PubKeyFromHex(parts[1])
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%d:%s:%s", kind, pubkey, parts[2]), true
+}
+
+func evaluatePricePolicy(products []productEnvelope, plan searchPlan, opts Scope2Options) pricePolicy {
+	if plan.Sort != SortPriceAsc && plan.Sort != SortPriceDesc {
+		return pricePolicy{Allowed: true}
+	}
+	if opts.AllowMixedCurrencySort {
+		return pricePolicy{Allowed: true}
+	}
+
+	counts := make(map[string]int)
+	for _, pe := range products {
+		if pe.HasPrice {
+			counts[pe.Currency]++
+		}
+	}
+	if len(counts) <= 1 {
+		return pricePolicy{Allowed: true}
+	}
+	if !plan.Partial {
+		return pricePolicy{
+			Reason: "blocked: mixed-currency price sort requires partial=1 or trusted normalization",
+		}
+	}
+
+	bestCurrency := ""
+	bestCount := -1
+	for currency, count := range counts {
+		if count > bestCount || (count == bestCount && strings.Compare(currency, bestCurrency) < 0) {
+			bestCurrency = currency
+			bestCount = count
+		}
+	}
+
+	return pricePolicy{
+		Allowed:         true,
+		PartialCurrency: bestCurrency,
+	}
+}
+
+func keepCurrencyCohort(products []productEnvelope, currency string) []productEnvelope {
+	trimmed := make([]productEnvelope, 0, len(products))
+	for _, pe := range products {
+		if pe.HasPrice && pe.Currency == currency {
+			trimmed = append(trimmed, pe)
+		}
+	}
+	return trimmed
+}
+
+func compareProducts(a, b productEnvelope, mode ProductSort) int {
+	switch mode {
+	case SortPriceAsc, SortPriceDesc:
+		if a.HasPrice != b.HasPrice {
+			if a.HasPrice {
+				return -1
+			}
+			return 1
+		}
+		if a.HasPrice && b.HasPrice && a.Price != b.Price {
+			if a.Price < b.Price {
+				if mode == SortPriceAsc {
+					return -1
+				}
+				return 1
+			}
+			if mode == SortPriceAsc {
+				return 1
+			}
+			return -1
+		}
+	case SortUpdatedAtDesc:
+		if a.UpdatedAt > b.UpdatedAt {
+			return -1
+		}
+		if a.UpdatedAt < b.UpdatedAt {
+			return 1
+		}
+	case SortNewest:
+		if a.Event.CreatedAt > b.Event.CreatedAt {
+			return -1
+		}
+		if a.Event.CreatedAt < b.Event.CreatedAt {
+			return 1
+		}
+	}
+
+	if a.UpdatedAt > b.UpdatedAt {
+		return -1
+	}
+	if a.UpdatedAt < b.UpdatedAt {
+		return 1
+	}
+	if a.Event.CreatedAt > b.Event.CreatedAt {
+		return -1
+	}
+	if a.Event.CreatedAt < b.Event.CreatedAt {
+		return 1
+	}
+	return strings.Compare(a.Event.ID.Hex(), b.Event.ID.Hex())
+}
+
+func appendUnique(target []string, values ...string) []string {
+	for _, value := range values {
+		if !slices.Contains(target, value) {
+			target = append(target, value)
+		}
+	}
+	return target
 }
 
 func withDefaults(opts *Scope2Options) {
@@ -270,120 +650,6 @@ func isProductQuery(filter nostr.Filter) bool {
 		}
 	}
 	return false
-}
-
-func dedupeLatestProducts(events []nostr.Event) []productEnvelope {
-	byAddress := make(map[string]productEnvelope, len(events))
-	for _, evt := range events {
-		address := fmt.Sprintf("%d:%s:%s", evt.Kind, evt.PubKey, evt.Tags.GetD())
-		if evt.Tags.GetD() == "" {
-			address = evt.ID.Hex()
-		}
-
-		if current, ok := byAddress[address]; ok {
-			if evt.CreatedAt < current.Event.CreatedAt {
-				continue
-			}
-			if evt.CreatedAt == current.Event.CreatedAt && evt.ID.Hex() > current.Event.ID.Hex() {
-				continue
-			}
-		}
-
-		price, currency, hasPrice := extractPrice(evt.Content)
-		byAddress[address] = productEnvelope{
-			Event:     evt,
-			UpdatedAt: extractUpdatedAt(evt),
-			Price:     price,
-			Currency:  currency,
-			HasPrice:  hasPrice,
-		}
-	}
-
-	out := make([]productEnvelope, 0, len(byAddress))
-	for _, pe := range byAddress {
-		out = append(out, pe)
-	}
-	return out
-}
-
-func sortProducts(events []productEnvelope, mode ProductSort, allowMixedCurrency bool, partial bool) []productEnvelope {
-	if mode == SortPriceAsc || mode == SortPriceDesc {
-		currencies := map[string]struct{}{}
-		for _, pe := range events {
-			if pe.HasPrice && pe.Currency != "" {
-				currencies[pe.Currency] = struct{}{}
-			}
-		}
-
-		if len(currencies) > 1 && !allowMixedCurrency && partial {
-			seed := ""
-			for c := range currencies {
-				seed = c
-				break
-			}
-			trimmed := make([]productEnvelope, 0, len(events))
-			for _, pe := range events {
-				if pe.HasPrice && pe.Currency == seed {
-					trimmed = append(trimmed, pe)
-				}
-			}
-			events = trimmed
-		}
-	}
-
-	slices.SortFunc(events, func(a, b productEnvelope) int {
-		if mode == SortPriceAsc || mode == SortPriceDesc {
-			if a.HasPrice != b.HasPrice {
-				if a.HasPrice {
-					return -1
-				}
-				return 1
-			}
-			if a.HasPrice && b.HasPrice {
-				if a.Price < b.Price {
-					if mode == SortPriceAsc {
-						return -1
-					}
-					return 1
-				}
-				if a.Price > b.Price {
-					if mode == SortPriceAsc {
-						return 1
-					}
-					return -1
-				}
-			}
-		}
-
-		if mode == SortUpdatedAtDesc {
-			if a.UpdatedAt > b.UpdatedAt {
-				return -1
-			}
-			if a.UpdatedAt < b.UpdatedAt {
-				return 1
-			}
-		}
-
-		if a.Event.CreatedAt > b.Event.CreatedAt {
-			return -1
-		}
-		if a.Event.CreatedAt < b.Event.CreatedAt {
-			return 1
-		}
-		if a.Event.ID.Hex() < b.Event.ID.Hex() {
-			return -1
-		}
-		if a.Event.ID.Hex() > b.Event.ID.Hex() {
-			return 1
-		}
-		return 0
-	})
-
-	return events
-}
-
-type cursorState struct {
-	ID string `json:"id"`
 }
 
 func findCursorStart(products []productEnvelope, rawCursor string) int {
