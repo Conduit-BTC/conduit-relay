@@ -17,6 +17,14 @@ From this project root:
 go build ./cmd/demo
 ```
 
+## Build Docker image (for conduit-mono local stack)
+
+From this project root:
+
+```bash
+docker build -t conduitl2:local .
+```
+
 ## Run the demo relay
 
 From this project root:
