@@ -1,0 +1,26 @@
+app = "conduitl2"
+
+[env]
+  PORT = "3334"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "4gb"
+
+[[services]]
+  internal_port = 3334
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    force_https = true
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "5s"

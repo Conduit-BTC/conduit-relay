@@ -25,6 +25,48 @@ From this project root:
 docker build -t conduitl2:local .
 ```
 
+## Deploy to Fly.io
+
+This repository now includes a `fly.toml` tuned for production relay rollout:
+
+- VM preset: `performance-1x`
+- Memory per Machine: `4gb`
+- Fly Proxy edge handlers on `80`/`443` mapped to internal `3334`
+
+TLS and reverse-proxy behavior:
+
+- `wss://conduitl2.fly.dev` is served through Fly Proxy TLS termination on port `443`
+- The app only listens on plain HTTP/WebSocket on `PORT=3334`; no app-level TLS config is required
+- Port `80` is redirected to HTTPS
+
+For a custom domain (for example `relay.example.com`), Fly manages certificate issuance after DNS is configured:
+
+```bash
+fly certs add relay.example.com -a conduitl2
+fly certs check relay.example.com -a conduitl2
+```
+
+Apply the DNS records shown by `fly certs add` (typically `A`, `AAAA`, or `CNAME`) at your DNS provider.
+
+Typical deploy flow:
+
+```bash
+fly deploy -a conduitl2 --image registry.fly.io/conduitl2:<deployment-tag>
+fly scale count 2 -a conduitl2
+```
+
+You can confirm sizing and Machine count with:
+
+```bash
+fly scale show -a conduitl2
+```
+
+You can verify secure relay connectivity with:
+
+```bash
+nak relay wss://conduitl2.fly.dev
+```
+
 ## Run the demo relay
 
 From this project root:
