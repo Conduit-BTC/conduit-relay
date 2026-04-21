@@ -5,7 +5,7 @@ app = "conduitl2"
 
 [[vm]]
   size = "performance-1x"
-  memory = "4gb"
+  memory = "2gb"
 
 [[services]]
   internal_port = 3334
