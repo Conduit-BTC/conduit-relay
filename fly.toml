@@ -2,6 +2,16 @@ app = "conduitl2"
 
 [env]
   PORT = "3334"
+  DATA_DIR = "/data"
+  SYNC_ENABLED = "true"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+  initial_size = "10gb"
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = "1gb"
+  auto_extend_size_limit = "50gb"
 
 [[vm]]
   size = "performance-1x"

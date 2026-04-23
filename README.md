@@ -27,11 +27,13 @@ docker build -t conduitl2:local .
 
 ## Deploy to Fly.io
 
-This repository now includes a `fly.toml` tuned for production relay rollout:
+This repository now includes a `fly.toml` tuned for a production relay rollout:
 
 - VM preset: `performance-1x`
-- Memory per Machine: `4gb`
+- Memory per Machine: `2gb`
 - Fly Proxy edge handlers on `80`/`443` mapped to internal `3334`
+- Persistent volume mounted at `/data`
+- Relay sync enabled by default with `DATA_DIR=/data`
 
 TLS and reverse-proxy behavior:
 
@@ -48,16 +50,17 @@ fly certs check relay.example.com -a conduitl2
 
 Apply the DNS records shown by `fly certs add` (typically `A`, `AAAA`, or `CNAME`) at your DNS provider.
 
+Create one volume per machine before scaling out, because Fly volumes are not shared between machines:
+
+```bash
+fly volumes create data --region iad --size 10 -n 2 -a conduitl2
+```
+
 Typical deploy flow:
 
 ```bash
 fly deploy -a conduitl2 --image registry.fly.io/conduitl2:<deployment-tag>
 fly scale count 2 -a conduitl2
-```
-
-You can confirm sizing and Machine count with:
-
-```bash
 fly scale show -a conduitl2
 ```
 
@@ -65,6 +68,61 @@ You can verify secure relay connectivity with:
 
 ```bash
 nak relay wss://conduitl2.fly.dev
+```
+
+## Product cache sync
+
+The demo relay can now preload and continuously cache public `kind:30402` products plus `kind:5` deletions from public relays.
+
+How it works:
+
+- Historical preload runs at startup from `SYNC_BACKFILL_SINCE` (default: `2020-01-01T00:00:00Z`)
+- Results are persisted in the local BoltDB event store under `DATA_DIR`
+- A sync watermark is stored in `sync-state.json` under `DATA_DIR`
+- After backfill, the relay keeps live subscriptions open to the configured source relays and imports new products/deletions continuously
+
+Default source relays:
+
+- `wss://relay.damus.io`
+- `wss://nos.lol`
+- `wss://relay.primal.net`
+- `wss://relay.plebeian.market`
+
+Observed relay-set experiment for the last month of `kind:30402` events:
+
+- `damus + nos.lol + primal`: about `940` unique product events
+- Adding `relay.plebeian.market`: about `1038` unique product events
+- Adding `offchain.pub` on top of that only added about `13` more unique events in the same window, so it is not enabled by default
+
+Observed local storage sample during import:
+
+- Last-month raw upstream payload from the default relay set was about `2.3 MB` of JSON event data
+- A partial local BoltDB cache sample after `75s` of import was about `9.6 MB` while storing `69` raw `30402` events and `100` deletion events
+- Expect full storage growth to be modest for the current product volume, but still keep the Fly volume because the cache must survive restarts
+
+Runtime environment variables:
+
+- `DATA_DIR`: persistent storage directory
+- `SYNC_ENABLED`: enable preload/live caching
+- `SYNC_RELAYS`: comma-separated source relay URLs
+- `SYNC_BACKFILL_SINCE`: RFC3339 timestamp for the initial historical import start
+- `SYNC_BACKFILL_WINDOW`: duration for backfill window splitting, for example `168h`
+- `SYNC_LIVE_LOOKBACK`: overlap window before live mode, for example `10m`
+- `SYNC_FETCH_LIMIT`: per-window relay request limit
+
+Example local run with sync enabled:
+
+```bash
+SYNC_ENABLED=true \
+DATA_DIR=tmp/demo-data \
+SYNC_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net,wss://relay.plebeian.market' \
+go run ./cmd/demo
+```
+
+You can inspect whether products were imported with:
+
+```bash
+nak req -q -k 30402 -l 10 --search 'conduit-l2:q=;sort=newest' ws://127.0.0.1:3334
 ```
 
 ## Run the demo relay
