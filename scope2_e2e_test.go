@@ -117,6 +117,62 @@ func TestScope2E2E_ProductBrowseOmitsDeletedLatestRevision(t *testing.T) {
 	require.Empty(t, page)
 }
 
+func TestScope2E2E_ProductBrowseSearchesAndSortsTagOnlyProducts(t *testing.T) {
+	relay := khatru.NewRelay()
+	store := &slicestore.SliceStore{}
+	require.NoError(t, store.Init())
+	relay.UseEventstore(store, 500)
+
+	base := relay.QueryStored
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+
+	srv := httptest.NewServer(relay)
+	defer srv.Close()
+
+	url := "ws" + srv.URL[4:]
+	client, err := nostr.RelayConnect(t.Context(), url, nostr.RelayOptions{})
+	require.NoError(t, err)
+	defer client.Close()
+
+	sk := nostr.Generate()
+	apple := productEventWithTags(t, sk, 1000, "apple", "", nostr.Tags{{"d", "apple"}, {"title", "Apple Jam"}, {"summary", "Spiced pantry staple"}, {"price", "19", "USD"}, {"published_at", "1000"}})
+	banana := productEventWithTags(t, sk, 1001, "banana", "", nostr.Tags{{"d", "banana"}, {"title", "Banana Bread"}, {"summary", "Bakery loaf"}, {"price", "7", "USD"}, {"published_at", "1001"}})
+	carrot := productEventWithTags(t, sk, 1002, "carrot", "", nostr.Tags{{"d", "carrot"}, {"title", "Carrot Cake"}, {"summary", "Dessert slice"}, {"price", "12", "USD"}, {"published_at", "1002"}})
+
+	ctxPub, cancelPub := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelPub()
+	require.NoError(t, client.Publish(ctxPub, apple))
+	require.NoError(t, client.Publish(ctxPub, banana))
+	require.NoError(t, client.Publish(ctxPub, carrot))
+
+	ctxSub, cancelSub := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelSub()
+
+	sub, err := client.Subscribe(ctxSub, nostr.Filter{
+		Kinds:  []nostr.Kind{30402},
+		Limit:  10,
+		Search: "conduit-l2:q=cake;sort=price_asc",
+	}, nostr.SubscriptionOptions{})
+	require.NoError(t, err)
+	defer sub.Unsub()
+
+	page := collectUntilEOSE(t, sub, 5*time.Second)
+	require.Len(t, page, 1)
+	require.Equal(t, carrot.ID, page[0].ID)
+
+	subAll, err := client.Subscribe(ctxSub, nostr.Filter{
+		Kinds:  []nostr.Kind{30402},
+		Limit:  10,
+		Search: "conduit-l2:q=;sort=price_asc",
+	}, nostr.SubscriptionOptions{})
+	require.NoError(t, err)
+	defer subAll.Unsub()
+
+	pageAll := collectUntilEOSE(t, subAll, 5*time.Second)
+	require.Equal(t, []nostr.ID{banana.ID, carrot.ID, apple.ID}, eventIDs(pageAll))
+}
+
 func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 	relay := khatru.NewRelay()
 	store := &slicestore.SliceStore{}
@@ -236,6 +292,13 @@ func productEvent(t *testing.T, sk nostr.SecretKey, createdAt int64, dTag, conte
 	return evt
 }
 
+func productEventWithTags(t *testing.T, sk nostr.SecretKey, createdAt int64, dTag, content string, tags nostr.Tags) nostr.Event {
+	t.Helper()
+	evt := nostr.Event{CreatedAt: nostr.Timestamp(createdAt), Kind: 30402, Tags: tags, Content: content}
+	require.NoError(t, evt.Sign(sk))
+	return evt
+}
+
 func deleteEventForProduct(t *testing.T, sk nostr.SecretKey, createdAt int64, product nostr.Event) nostr.Event {
 	t.Helper()
 	address := fmt.Sprintf("%d:%s:%s", product.Kind, product.PubKey.Hex(), product.Tags.GetD())
@@ -266,4 +329,12 @@ func collectUntilEOSE(t *testing.T, sub *nostr.Subscription, timeout time.Durati
 			t.Fatal("timed out waiting for EOSE")
 		}
 	}
+}
+
+func eventIDs(events []nostr.Event) []nostr.ID {
+	ids := make([]nostr.ID, 0, len(events))
+	for _, evt := range events {
+		ids = append(ids, evt.ID)
+	}
+	return ids
 }

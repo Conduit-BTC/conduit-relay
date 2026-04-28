@@ -413,8 +413,8 @@ func (s *scope2State) matchProducts(filter nostr.Filter, text string) []productE
 }
 
 func buildProductEnvelope(evt nostr.Event) productEnvelope {
-	title, summary := extractProductText(evt.Content)
-	price, currency, hasPrice := extractPrice(evt.Content)
+	title, summary := extractProductText(evt)
+	price, currency, hasPrice := extractPrice(evt)
 
 	return productEnvelope{
 		Address:    productAddress(evt),
@@ -423,7 +423,7 @@ func buildProductEnvelope(evt nostr.Event) productEnvelope {
 		Price:      price,
 		Currency:   currency,
 		HasPrice:   hasPrice,
-		SearchText: strings.ToLower(title + "\n" + summary),
+		SearchText: strings.ToLower(strings.TrimSpace(title + "\n" + summary)),
 	}
 }
 
@@ -682,7 +682,24 @@ func resolvedLimit(filter nostr.Filter, opts Scope2Options) int {
 	return filter.Limit
 }
 
-func extractProductText(content string) (string, string) {
+func extractProductText(evt nostr.Event) (string, string) {
+	title := firstTagValue(evt.Tags, "title")
+	summary := firstTagValue(evt.Tags, "summary")
+	if title != "" || summary != "" {
+		fallbackTitle, fallbackSummary := extractProductTextFromContent(evt.Content)
+		if title == "" {
+			title = fallbackTitle
+		}
+		if summary == "" {
+			summary = fallbackSummary
+		}
+		return title, summary
+	}
+
+	return extractProductTextFromContent(evt.Content)
+}
+
+func extractProductTextFromContent(content string) (string, string) {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
 		return "", ""
@@ -693,7 +710,39 @@ func extractProductText(content string) (string, string) {
 	return title, summary
 }
 
-func extractPrice(content string) (float64, string, bool) {
+func extractPrice(evt nostr.Event) (float64, string, bool) {
+	if price, currency, ok := extractPriceFromTags(evt.Tags); ok {
+		return price, currency, true
+	}
+
+	return extractPriceFromContent(evt.Content)
+}
+
+func extractPriceFromTags(tags nostr.Tags) (float64, string, bool) {
+	for _, tag := range tags {
+		if len(tag) < 2 || tag[0] != "price" {
+			continue
+		}
+
+		price, ok := toFloat(tag[1])
+		if !ok {
+			continue
+		}
+
+		currency := ""
+		if len(tag) >= 3 {
+			currency = tag[2]
+		} else {
+			currency = firstTagValue(tags, "currency")
+		}
+
+		return price, strings.ToUpper(strings.TrimSpace(currency)), true
+	}
+
+	return 0, "", false
+}
+
+func extractPriceFromContent(content string) (float64, string, bool) {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
 		return 0, "", false
@@ -713,21 +762,68 @@ func extractPrice(content string) (float64, string, bool) {
 }
 
 func extractUpdatedAt(evt nostr.Event) nostr.Timestamp {
+	if ts, ok := extractTimestampFromTags(evt.Tags, "updated_at", "updatedAt", "published_at", "publishedAt"); ok {
+		return ts
+	}
+
+	if ts, ok := extractUpdatedAtFromContent(evt.Content); ok {
+		return ts
+	}
+
+	return evt.CreatedAt
+}
+
+func extractUpdatedAtFromContent(content string) (nostr.Timestamp, bool) {
 	var payload map[string]any
-	if err := json.Unmarshal([]byte(evt.Content), &payload); err == nil {
-		if raw, ok := payload["updatedAt"]; ok {
-			if f, ok := toFloat(raw); ok {
-				return nostr.Timestamp(int64(f))
-			}
-			if s, ok := raw.(string); ok {
-				if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
-					return nostr.Timestamp(n)
-				}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return 0, false
+	}
+
+	for _, key := range []string{"updatedAt", "updated_at", "publishedAt", "published_at"} {
+		if ts, ok := timestampFromValue(payload[key]); ok {
+			return ts, true
+		}
+	}
+
+	return 0, false
+}
+
+func extractTimestampFromTags(tags nostr.Tags, names ...string) (nostr.Timestamp, bool) {
+	for _, name := range names {
+		value := firstTagValue(tags, name)
+		if ts, ok := timestampFromValue(value); ok {
+			return ts, true
+		}
+	}
+
+	return 0, false
+}
+
+func timestampFromValue(raw any) (nostr.Timestamp, bool) {
+	if f, ok := toFloat(raw); ok {
+		return nostr.Timestamp(int64(f)), true
+	}
+	if s, ok := raw.(string); ok {
+		if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+			return nostr.Timestamp(n), true
+		}
+	}
+	return 0, false
+}
+
+func firstTagValue(tags nostr.Tags, names ...string) string {
+	for _, tag := range tags {
+		if len(tag) < 2 {
+			continue
+		}
+		for _, name := range names {
+			if tag[0] == name {
+				return strings.TrimSpace(tag[1])
 			}
 		}
 	}
 
-	return evt.CreatedAt
+	return ""
 }
 
 func toFloat(v any) (float64, bool) {

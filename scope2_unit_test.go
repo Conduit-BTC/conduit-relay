@@ -78,6 +78,63 @@ func TestEvaluatePriceSortUsesUpdatedAtTieBreakers(t *testing.T) {
 	require.Equal(t, []nostr.ID{e2.ID, e3.ID, e1.ID}, idsOf(got))
 }
 
+func TestBuildProductEnvelopeUsesTagFields(t *testing.T) {
+	evt := productEventWithTagsFixture(
+		7,
+		7,
+		1000,
+		"tagged",
+		"not json",
+		nostr.Tags{
+			{"d", "tagged"},
+			{"title", "Honey Cajeta"},
+			{"summary", "Goat milk caramel"},
+			{"price", "21", "usd"},
+			{"published_at", "1009"},
+		},
+	)
+
+	got := buildProductEnvelope(evt)
+	require.Equal(t, 21.0, got.Price)
+	require.Equal(t, "USD", got.Currency)
+	require.True(t, got.HasPrice)
+	require.Equal(t, nostr.Timestamp(1009), got.UpdatedAt)
+	require.Contains(t, got.SearchText, "honey cajeta")
+	require.Contains(t, got.SearchText, "goat milk caramel")
+}
+
+func TestEvaluateMatchesTagOnlyProducts(t *testing.T) {
+	state := newScope2State(nil)
+
+	apple := productEventWithTagsFixture(
+		1,
+		1,
+		1000,
+		"apple",
+		"",
+		nostr.Tags{{"d", "apple"}, {"title", "Apple Jam"}, {"summary", "Spiced spread"}, {"price", "9", "USD"}, {"published_at", "1000"}},
+	)
+	banana := productEventWithTagsFixture(
+		2,
+		2,
+		1001,
+		"banana",
+		"",
+		nostr.Tags{{"d", "banana"}, {"title", "Banana Bread"}, {"summary", "Bakery loaf"}, {"price", "7", "USD"}, {"published_at", "1001"}},
+	)
+
+	state.applyEvent(apple)
+	state.applyEvent(banana)
+
+	got, reason := state.evaluate(
+		nostr.Filter{Kinds: []nostr.Kind{30402}, Limit: 10},
+		searchPlan{Text: "bread", Sort: SortPriceAsc},
+		Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10},
+	)
+	require.Empty(t, reason)
+	require.Equal(t, []nostr.ID{banana.ID}, idsOf(got))
+}
+
 func TestEvaluateRejectsMixedCurrencyWithoutPartial(t *testing.T) {
 	state := newScope2State(nil)
 
@@ -139,12 +196,16 @@ func idsOf(products []productEnvelope) []nostr.ID {
 }
 
 func productEventFixture(idSeed byte, authorSeed byte, createdAt int64, dTag, content string) nostr.Event {
+	return productEventWithTagsFixture(idSeed, authorSeed, createdAt, dTag, content, nostr.Tags{{"d", dTag}})
+}
+
+func productEventWithTagsFixture(idSeed byte, authorSeed byte, createdAt int64, dTag, content string, tags nostr.Tags) nostr.Event {
 	return nostr.Event{
 		ID:        mustID(idSeed),
 		PubKey:    mustPubKey(authorSeed),
 		CreatedAt: nostr.Timestamp(createdAt),
 		Kind:      30402,
-		Tags:      nostr.Tags{{"d", dTag}},
+		Tags:      tags,
 		Content:   content,
 	}
 }
