@@ -20,6 +20,7 @@ import (
 
 const (
 	defaultBackfillWindow = 7 * 24 * time.Hour
+	defaultBackfillSince  = 365 * 24 * time.Hour
 	minBackfillWindow     = time.Second
 )
 
@@ -47,6 +48,7 @@ type SyncStats struct {
 	Imported   int
 	Rejected   int
 	Duplicates int
+	Ignored    int
 }
 
 type syncState struct {
@@ -73,6 +75,7 @@ func DefaultSyncConfig(statePath string) SyncConfig {
 		Enabled:          false,
 		Relays:           slices.Clone(defaultSyncRelays),
 		StatePath:        statePath,
+		BackfillSince:    time.Now().Add(-defaultBackfillSince).UTC(),
 		BackfillWindow:   defaultBackfillWindow,
 		LiveLookback:     10 * time.Minute,
 		FetchLimit:       500,
@@ -124,6 +127,8 @@ func StartRelaySync(ctx context.Context, relay *khatru.Relay, cfg SyncConfig) (*
 		return nil, err
 	}
 
+	cfg.Logger.Printf("sync enabled relays=%d backfill_since=%s window=%s live_lookback=%s limit=%d state_path=%s", len(cfg.Relays), syncer.initialBackfillStart().Format(time.RFC3339), cfg.BackfillWindow, cfg.LiveLookback, cfg.FetchLimit, cfg.StatePath)
+
 	go syncer.run(ctx)
 	return syncer, nil
 }
@@ -147,11 +152,15 @@ func (s *RelaySyncer) run(ctx context.Context) {
 }
 
 func (s *RelaySyncer) backfill(ctx context.Context) error {
+	s.cfg.withDefaults()
 	start := s.initialBackfillStart()
 	end := time.Now().UTC()
 	if !start.Before(end) {
+		s.cfg.Logger.Printf("backfill skipped start=%s end=%s", start.Format(time.RFC3339), end.Format(time.RFC3339))
 		return nil
 	}
+
+	s.cfg.Logger.Printf("backfill starting start=%s end=%s window=%s", start.Format(time.RFC3339), end.Format(time.RFC3339), s.cfg.BackfillWindow)
 
 	window := s.cfg.BackfillWindow
 	for start.Before(end) {
@@ -164,15 +173,25 @@ func (s *RelaySyncer) backfill(ctx context.Context) error {
 			next = end
 		}
 
+		windowImportedBefore := s.Stats().Imported
+		windowDuplicateBefore := s.Stats().Duplicates
+		windowRejectedBefore := s.Stats().Rejected
 		full, err := s.fetchWindow(ctx, start, next)
 		if err != nil {
 			return err
 		}
+		stats := s.Stats()
+		importedDelta := stats.Imported - windowImportedBefore
+		duplicateDelta := stats.Duplicates - windowDuplicateBefore
+		rejectedDelta := stats.Rejected - windowRejectedBefore
+		full = importedDelta >= s.cfg.FetchLimit
+		s.cfg.Logger.Printf("backfill window start=%s end=%s imported=%d duplicates=%d rejected=%d full=%t", start.Format(time.RFC3339), next.Format(time.RFC3339), importedDelta, duplicateDelta, rejectedDelta, full)
 		if full && next.Sub(start) > minBackfillWindow {
 			window /= 2
 			if window < minBackfillWindow {
 				window = minBackfillWindow
 			}
+			s.cfg.Logger.Printf("backfill window saturated; reducing window to %s", window)
 			continue
 		}
 
@@ -182,10 +201,13 @@ func (s *RelaySyncer) backfill(ctx context.Context) error {
 		start = next
 	}
 
+	s.cfg.Logger.Printf("backfill completed watermark=%s imported=%d duplicates=%d rejected=%d", s.currentWatermark().Format(time.RFC3339), s.Stats().Imported, s.Stats().Duplicates, s.Stats().Rejected)
+
 	return nil
 }
 
 func (s *RelaySyncer) streamLive(ctx context.Context) error {
+	s.cfg.withDefaults()
 	since := time.Now().Add(-s.cfg.LiveLookback)
 	if watermark := s.currentWatermark(); !watermark.IsZero() {
 		candidate := watermark.Add(-s.cfg.LiveLookback)
@@ -198,6 +220,7 @@ func (s *RelaySyncer) streamLive(ctx context.Context) error {
 		Kinds: []nostr.Kind{30402, 5},
 		Since: nostr.Timestamp(since.Unix()),
 	}
+	s.cfg.Logger.Printf("live sync starting since=%s relays=%d", since.UTC().Format(time.RFC3339), len(s.cfg.Relays))
 
 	for ie := range s.pool.SubscribeMany(ctx, s.cfg.Relays, filter, nostr.SubscriptionOptions{Label: "conduitl2-live"}) {
 		s.handleIncomingEvent(ctx, ie.Event)
@@ -233,6 +256,10 @@ func (s *RelaySyncer) fetchWindow(ctx context.Context, start, end time.Time) (bo
 }
 
 func (s *RelaySyncer) handleIncomingEvent(ctx context.Context, evt nostr.Event) {
+	if evt.Kind == 5 && !targetsProductDeletion(evt) {
+		s.recordIgnored()
+		return
+	}
 	if evt.Kind != 30402 && evt.Kind != 5 {
 		return
 	}
@@ -310,13 +337,18 @@ func (s *RelaySyncer) lookupCurrentReplaceable(ctx context.Context, evt nostr.Ev
 func (s *RelaySyncer) initialBackfillStart() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state.SyncedUntil > 0 {
-		return time.Unix(s.state.SyncedUntil, 0).UTC()
-	}
+	configuredStart := time.Now().Add(-defaultBackfillSince).UTC()
 	if !s.cfg.BackfillSince.IsZero() {
-		return s.cfg.BackfillSince.UTC()
+		configuredStart = s.cfg.BackfillSince.UTC()
 	}
-	return time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if s.state.SyncedUntil <= 0 {
+		return configuredStart
+	}
+	persistedStart := time.Unix(s.state.SyncedUntil, 0).UTC()
+	if configuredStart.After(persistedStart) {
+		return configuredStart
+	}
+	return persistedStart
 }
 
 func (s *RelaySyncer) advanceState(ts time.Time) error {
@@ -354,6 +386,27 @@ func (s *RelaySyncer) recordDuplicate() {
 	s.mu.Lock()
 	s.stats.Duplicates++
 	s.mu.Unlock()
+}
+
+func (s *RelaySyncer) recordIgnored() {
+	s.mu.Lock()
+	s.stats.Ignored++
+	s.mu.Unlock()
+}
+
+func targetsProductDeletion(evt nostr.Event) bool {
+	for _, tag := range evt.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		if tag[0] == "a" && strings.HasPrefix(tag[1], "30402:") {
+			return true
+		}
+		if tag[0] == "k" && tag[1] == "30402" {
+			return true
+		}
+	}
+	return false
 }
 
 func readSyncState(path string) (syncState, error) {

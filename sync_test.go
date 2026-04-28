@@ -137,6 +137,12 @@ func TestRelaySyncerStreamLiveUsesRecentOverlap(t *testing.T) {
 	require.LessOrEqual(t, int64(filter.Since), now.Add(-1*time.Minute).Unix())
 }
 
+func TestTargetsProductDeletion(t *testing.T) {
+	require.True(t, targetsProductDeletion(nostr.Event{Kind: 5, Tags: nostr.Tags{{"a", "30402:pubkey:dtag"}}}))
+	require.True(t, targetsProductDeletion(nostr.Event{Kind: 5, Tags: nostr.Tags{{"k", "30402"}}}))
+	require.False(t, targetsProductDeletion(nostr.Event{Kind: 5, Tags: nostr.Tags{{"k", "30023"}, {"a", "30023:pubkey:dtag"}}}))
+}
+
 func newSyncTestRelay(t *testing.T) (*khatru.Relay, *slicestore.SliceStore) {
 	t.Helper()
 	relay := khatru.NewRelay()

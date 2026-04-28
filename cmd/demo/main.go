@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"conduitl2"
 	"fiatjaf.com/nostr/eventstore"
@@ -50,8 +52,18 @@ func main() {
 		log.Fatalf("failed to start relay sync: %v", err)
 	}
 
+	server := &http.Server{Addr: ":" + cfg.Port, Handler: relay}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server shutdown failed: %v", err)
+		}
+	}()
+
 	log.Printf("listening on http://127.0.0.1:%s (ws://127.0.0.1:%s)", cfg.Port, cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, relay); err != nil {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("relay stopped: %v", err)
 	}
 }

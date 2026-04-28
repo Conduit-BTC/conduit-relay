@@ -34,6 +34,7 @@ This repository now includes a `fly.toml` tuned for a production relay rollout:
 - Fly Proxy edge handlers on `80`/`443` mapped to internal `3334`
 - Persistent volume mounted at `/data`
 - Relay sync enabled by default with `DATA_DIR=/data`
+- Default deployed backfill horizon is recent-first, not full-history
 
 TLS and reverse-proxy behavior:
 
@@ -53,8 +54,17 @@ Apply the DNS records shown by `fly certs add` (typically `A`, `AAAA`, or `CNAME
 Create one volume per machine before scaling out, because Fly volumes are not shared between machines:
 
 ```bash
-fly volumes create data --region iad --size 10 -n 2 -a conduitl2
+fly volumes create data --region iad --size 1 -n 2 -a conduitl2
 ```
+
+If you keep the current single-volume setup, the production recipe should explicitly stay single-machine:
+
+```bash
+fly scale count 1 -a conduitl2
+fly volumes list -a conduitl2
+```
+
+If you want multiple app machines later, you need one volume per machine and each machine will build its own local cache independently.
 
 Typical deploy flow:
 
@@ -76,10 +86,12 @@ The demo relay can now preload and continuously cache public `kind:30402` produc
 
 How it works:
 
-- Historical preload runs at startup from `SYNC_BACKFILL_SINCE` (default: `2020-01-01T00:00:00Z`)
+- Historical preload runs at startup from `SYNC_BACKFILL_SINCE`
+- Default backfill horizon is `1 year` in the past, so deployed relays reach current marketplace inventory quickly without wasting days crawling from 2020
 - Results are persisted in the local BoltDB event store under `DATA_DIR`
 - A sync watermark is stored in `sync-state.json` under `DATA_DIR`
 - After backfill, the relay keeps live subscriptions open to the configured source relays and imports new products/deletions continuously
+- The relay logs each backfill window and the current watermark to stdout, so `fly logs` shows real sync progress
 
 Default source relays:
 
@@ -98,14 +110,15 @@ Observed local storage sample during import:
 
 - Last-month raw upstream payload from the default relay set was about `2.3 MB` of JSON event data
 - A partial local BoltDB cache sample after `75s` of import was about `9.6 MB` while storing `69` raw `30402` events and `100` deletion events
-- Expect full storage growth to be modest for the current product volume, but still keep the Fly volume because the cache must survive restarts
+- One-year upstream payload estimate was about `4.8 MB` for `30402` plus about `170 KB` for product-related `kind:5` deletion events
+- `1GB` is therefore a comfortable starting Fly volume size for the current cache shape; auto-extension remains enabled if usage grows materially
 
 Runtime environment variables:
 
 - `DATA_DIR`: persistent storage directory
 - `SYNC_ENABLED`: enable preload/live caching
 - `SYNC_RELAYS`: comma-separated source relay URLs
-- `SYNC_BACKFILL_SINCE`: RFC3339 timestamp for the initial historical import start
+- `SYNC_BACKFILL_SINCE`: RFC3339 timestamp for the initial historical import start; if unset, defaults to about 1 year ago
 - `SYNC_BACKFILL_WINDOW`: duration for backfill window splitting, for example `168h`
 - `SYNC_LIVE_LOOKBACK`: overlap window before live mode, for example `10m`
 - `SYNC_FETCH_LIMIT`: per-window relay request limit
@@ -123,6 +136,43 @@ You can inspect whether products were imported with:
 
 ```bash
 nak req -q -k 30402 -l 10 --search 'conduit-l2:q=;sort=newest' ws://127.0.0.1:3334
+```
+
+On Fly, useful debugging commands are:
+
+```bash
+fly logs -a conduitl2 --machine <machine-id>
+fly machine exec <machine-id> "sh -lc 'ls -la /data; cat /data/sync-state.json'" -a conduitl2 --timeout 60
+```
+
+`fly logs` only shows application stdout/stderr plus platform event lines. There is not a separate hidden machine-log stream for your Go process, so sync progress needs to be logged by the app itself.
+
+Useful Go-process log commands on Fly:
+
+```bash
+# Tail all current app stdout/stderr plus Fly platform lines
+fly logs -a conduitl2
+
+# Tail a single machine so the stream is easier to read
+fly logs -a conduitl2 --machine <machine-id>
+
+# Fetch buffered logs once, without tailing
+fly logs -a conduitl2 --machine <machine-id> --no-tail
+
+# Filter locally to only the Go process lines
+fly logs -a conduitl2 --machine <machine-id> --no-tail | grep '2026/'
+
+# Watch just sync progress lines from the Go process
+fly logs -a conduitl2 --machine <machine-id> | grep '\[conduitl2-sync\]\|backfill\|live sync\|sync enabled'
+```
+
+The last command works because the sync worker now logs its own startup settings, each backfill window, and the current watermark to stdout.
+
+If you are running a single attached volume, clean up stray unattached volumes after failed scale-out attempts:
+
+```bash
+fly volumes list -a conduitl2
+fly volumes destroy <unattached-volume-id> -a conduitl2
 ```
 
 ## Run the demo relay
