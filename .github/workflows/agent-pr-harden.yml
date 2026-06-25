@@ -33,6 +33,7 @@ concurrency:
 
 jobs:
   harden:
+    if: contains(fromJSON('["dylangolow","conduitdevelopers","kevin-kinkade"]'), github.actor)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -90,6 +91,7 @@ jobs:
           token: ${{ steps.app_token.outputs.token }}
 
       - name: Validate maintainer gate
+        id: maintainer_gate
         if: steps.agent_auth.outputs.has_auth == 'true'
         shell: bash
         env:
@@ -99,7 +101,9 @@ jobs:
           metadata="$(gh pr view "${{ inputs.pr_number }}" --json isCrossRepository,labels)"
           is_cross_repo="$(node -e 'const data = JSON.parse(process.argv[1]); console.log(data.isCrossRepository ? "true" : "false")' "$metadata")"
           has_gate_label="$(node -e 'const data = JSON.parse(process.argv[1]); const labels = data.labels.map((label) => label.name); console.log(labels.includes("agent-ready") || labels.includes("agent-fix") ? "true" : "false")' "$metadata")"
-          if [[ "${{ inputs.risk_class }}" == "C" ]]; then
+          risk_class="$(node -e 'const data = JSON.parse(process.argv[1]); const inputRisk = process.argv[2]; const labels = data.labels.map((label) => label.name); const risks = labels.map((label) => /^risk:([ABC])$/i.exec(label)?.[1]?.toUpperCase()).filter(Boolean); console.log(risks.includes("C") ? "C" : risks.includes("B") ? "B" : risks.includes("A") ? "A" : inputRisk)' "$metadata" "${{ inputs.risk_class }}")"
+          echo "risk_class=$risk_class" >> "$GITHUB_OUTPUT"
+          if [[ "$risk_class" == "C" ]]; then
             echo "Risk class C requires human-owned planning before agent code changes."
             exit 1
           fi
@@ -134,7 +138,7 @@ jobs:
             Task:
             ${{ inputs.task }}
 
-            Risk class: ${{ inputs.risk_class }}
+            Risk class: ${{ steps.maintainer_gate.outputs.risk_class }}
 
             You may edit files and push commits to the PR branch. Keep the
             change narrowly scoped to the requested task. Do not deploy, alter

@@ -28,11 +28,6 @@ jobs:
     env:
       AUTH_SECRET_NAME: ${{ inputs.auth_secret_name || 'CODEX_AUTH_JSON' }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
       - name: Check requested auth secret
         shell: bash
         env:
@@ -71,7 +66,6 @@ jobs:
         with:
           app-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
           private-key: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
-          permission-contents: read
           permission-secrets: write
 
       - name: Refresh CODEX_AUTH_JSON
