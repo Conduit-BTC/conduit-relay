@@ -1,0 +1,175 @@
+name: Agent PR Review
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize, ready_for_review]
+  pull_request_review_comment:
+    types: [created, edited]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: >-
+      contains(fromJSON('["dylangolow","conduitdevelopers","kevin-kinkade"]'), github.actor) &&
+      (
+        github.event_name == 'pull_request' ||
+        (github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          contains(github.event.comment.body, '/agent review')) ||
+        (github.event_name == 'pull_request_review_comment' &&
+          contains(github.event.comment.body, '/agent review')) ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check agent auth
+        id: agent_auth
+        shell: bash
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          SUDDEN_AGENT_AUTH_FILE: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
+          SUDDEN_AGENT_API_KEY: ${{ secrets.SUDDEN_AGENT_API_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_codex_auth_json=true" >> "$GITHUB_OUTPUT" || echo "has_codex_auth_json=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$SUDDEN_AGENT_AUTH_FILE" ]] && echo "has_auth_file=true" >> "$GITHUB_OUTPUT" || echo "has_auth_file=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_api_key=true" >> "$GITHUB_OUTPUT" || echo "has_api_key=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$CODEX_AUTH_JSON" || -n "$SUDDEN_AGENT_AUTH_FILE" || -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when agent auth is unavailable
+        if: steps.agent_auth.outputs.has_auth != 'true'
+        run: echo "CODEX_AUTH_JSON or Sudden Agent auth is not configured; skipping agent review."
+
+      - uses: actions/checkout@v7
+        if: steps.agent_auth.outputs.has_auth == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out workflow-dispatch pull request
+        if: steps.agent_auth.outputs.has_auth == 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout "${{ inputs.pr_number }}"
+
+      - name: Check workflow agent GitHub App auth
+        id: app_auth
+        if: steps.agent_auth.outputs.has_auth == 'true'
+        shell: bash
+        env:
+          WORKFLOW_AGENT_GITHUB_APP_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
+          WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$WORKFLOW_AGENT_GITHUB_APP_ID" && -n "$WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY" ]] && echo "has_app=true" >> "$GITHUB_OUTPUT" || echo "has_app=false" >> "$GITHUB_OUTPUT"
+
+      - name: Create workflow agent GitHub App token
+        id: app_token
+        if: steps.app_auth.outputs.has_app == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Require workflow agent GitHub App token
+        if: steps.agent_auth.outputs.has_auth == 'true' && steps.app_token.outputs.token == ''
+        run: |
+          echo "Agent PR Review requires the workflow agent GitHub App token."
+          exit 1
+
+      - name: Run Sudden Agent review with CODEX_AUTH_JSON
+        id: review_codex_auth_json
+        if: steps.agent_auth.outputs.has_codex_auth_json == 'true'
+        continue-on-error: ${{ steps.agent_auth.outputs.has_auth_file == 'true' || steps.agent_auth.outputs.has_api_key == 'true' }}
+        uses: sudden-network/agent@v1.13.1
+        with:
+          agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
+          model: gpt-5.4/xhigh
+          resume: true
+          prompt: |
+            You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+
+            Stay read-only. Do not edit files, push commits, create branches,
+            change labels, deploy, alter secrets, or update external services.
+
+            Review priorities:
+            1. Nostr relay protocol correctness, filtering, sync behavior, and regressions.
+            2. Privacy, auth, event handling, and denial-of-service risks.
+            3. Go concurrency, lifecycle, and error handling.
+            4. Test coverage and deterministic fixtures.
+            5. Maintainability.
+
+            Mandatory constraints:
+            - No key custody or wallet/signer secret handling.
+            - Do not expose event payloads beyond what is already public in the repo.
+            - Do not approve if required CI is pending or failed.
+
+            Output findings first with P0/P1/P2 severity and concrete file/line
+            references. For small safe fixes on changed lines, include a
+            GitHub ```suggestion block. If there are no blocking findings, say
+            so explicitly and list residual test or runtime risks.
+
+      - name: Run Sudden Agent review with auth file
+        id: review_auth_file
+        if: >-
+          steps.agent_auth.outputs.has_auth_file == 'true' &&
+          (steps.agent_auth.outputs.has_codex_auth_json != 'true' ||
+            steps.review_codex_auth_json.outcome == 'failure')
+        continue-on-error: ${{ steps.agent_auth.outputs.has_api_key == 'true' }}
+        uses: sudden-network/agent@v1.13.1
+        with:
+          agent_auth_file: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
+          model: gpt-5.4/xhigh
+          resume: true
+          prompt: |
+            You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+            Follow the same read-only review rules, priorities, and output
+            format as the CODEX_AUTH_JSON path in this workflow.
+
+      - name: Run Sudden Agent review with API key
+        if: >-
+          steps.agent_auth.outputs.has_api_key == 'true' &&
+          (steps.agent_auth.outputs.has_codex_auth_json != 'true' ||
+            steps.review_codex_auth_json.outcome == 'failure') &&
+          (steps.agent_auth.outputs.has_auth_file != 'true' ||
+            steps.review_auth_file.outcome == 'failure')
+        uses: sudden-network/agent@v1.13.1
+        with:
+          agent_api_key: ${{ secrets.SUDDEN_AGENT_API_KEY }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
+          model: gpt-5.4/xhigh
+          resume: true
+          prompt: |
+            You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+            Follow the same read-only review rules, priorities, and output
+            format as the CODEX_AUTH_JSON path in this workflow.
