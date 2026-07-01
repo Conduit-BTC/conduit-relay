@@ -17,18 +17,24 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ inputs.auth_secret_name || 'CODEX_AUTH_JSON' }}
-  cancel-in-progress: false
-
 jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        auth_secret_name:
+          - CODEX_AUTH_JSON
+          - SUDDEN_AGENT_AUTH_FILE
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.auth_secret_name }}
+      cancel-in-progress: false
     env:
-      AUTH_SECRET_NAME: ${{ inputs.auth_secret_name || 'CODEX_AUTH_JSON' }}
+      AUTH_SECRET_NAME: ${{ matrix.auth_secret_name }}
     steps:
       - name: Check requested auth secret
+        if: github.event_name == 'schedule' || matrix.auth_secret_name == inputs.auth_secret_name
         shell: bash
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
@@ -49,6 +55,7 @@ jobs:
           esac
 
       - name: Check workflow agent GitHub App auth
+        if: github.event_name == 'schedule' || matrix.auth_secret_name == inputs.auth_secret_name
         shell: bash
         env:
           WORKFLOW_AGENT_GITHUB_APP_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
@@ -61,6 +68,7 @@ jobs:
           }
 
       - name: Create workflow agent GitHub App token
+        if: github.event_name == 'schedule' || matrix.auth_secret_name == inputs.auth_secret_name
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
@@ -69,7 +77,7 @@ jobs:
           permission-secrets: write
 
       - name: Refresh CODEX_AUTH_JSON
-        if: env.AUTH_SECRET_NAME == 'CODEX_AUTH_JSON'
+        if: (github.event_name == 'schedule' || matrix.auth_secret_name == inputs.auth_secret_name) && env.AUTH_SECRET_NAME == 'CODEX_AUTH_JSON'
         uses: sudden-network/agent@v1.13.1
         with:
           agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
@@ -86,7 +94,7 @@ jobs:
             whether authentication succeeded.
 
       - name: Refresh SUDDEN_AGENT_AUTH_FILE
-        if: env.AUTH_SECRET_NAME == 'SUDDEN_AGENT_AUTH_FILE'
+        if: (github.event_name == 'schedule' || matrix.auth_secret_name == inputs.auth_secret_name) && env.AUTH_SECRET_NAME == 'SUDDEN_AGENT_AUTH_FILE'
         uses: sudden-network/agent@v1.13.1
         with:
           agent_auth_file: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}

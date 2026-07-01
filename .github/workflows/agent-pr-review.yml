@@ -64,6 +64,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out workflow-dispatch pull request
+        if: steps.agent_auth.outputs.has_auth == 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout "${{ inputs.pr_number }}"
+
       - name: Check workflow agent GitHub App auth
         id: app_auth
         if: steps.agent_auth.outputs.has_auth == 'true'
@@ -106,6 +112,7 @@ jobs:
           resume: true
           prompt: |
             You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
 
             Stay read-only. Do not edit files, push commits, create branches,
             change labels, deploy, alter secrets, or update external services.
@@ -142,9 +149,10 @@ jobs:
           model: gpt-5.4/xhigh
           resume: true
           prompt: |
-            You are reviewing a Conduit relay pull request. Follow the same
-            read-only review rules, priorities, and output format as the
-            CODEX_AUTH_JSON path in this workflow.
+            You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+            Follow the same read-only review rules, priorities, and output
+            format as the CODEX_AUTH_JSON path in this workflow.
 
       - name: Run Sudden Agent review with API key
         if: >-
@@ -161,6 +169,7 @@ jobs:
           model: gpt-5.4/xhigh
           resume: true
           prompt: |
-            You are reviewing a Conduit relay pull request. Follow the same
-            read-only review rules, priorities, and output format as the
-            CODEX_AUTH_JSON path in this workflow.
+            You are reviewing a Conduit relay pull request.
+            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+            Follow the same read-only review rules, priorities, and output
+            format as the CODEX_AUTH_JSON path in this workflow.
