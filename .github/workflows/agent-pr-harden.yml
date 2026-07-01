@@ -165,6 +165,12 @@ jobs:
           sudo: true
           prompt: |
             You are hardening PR #${{ inputs.pr_number }} for Conduit relay.
+
+            Task:
+            ${{ inputs.task }}
+
+            Risk class: ${{ steps.maintainer_gate.outputs.risk_class }}
+
             Follow the same scoped hardening rules and validation requirements
             as the CODEX_AUTH_JSON path in this workflow.
 
@@ -180,5 +186,11 @@ jobs:
           sudo: true
           prompt: |
             You are hardening PR #${{ inputs.pr_number }} for Conduit relay.
+
+            Task:
+            ${{ inputs.task }}
+
+            Risk class: ${{ steps.maintainer_gate.outputs.risk_class }}
+
             Follow the same scoped hardening rules and validation requirements
             as the CODEX_AUTH_JSON path in this workflow.
