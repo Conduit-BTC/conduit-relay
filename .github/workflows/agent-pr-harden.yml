@@ -42,18 +42,14 @@ jobs:
         shell: bash
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-          SUDDEN_AGENT_AUTH_FILE: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
-          SUDDEN_AGENT_API_KEY: ${{ secrets.SUDDEN_AGENT_API_KEY }}
         run: |
           set -euo pipefail
           [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_codex_auth_json=true" >> "$GITHUB_OUTPUT" || echo "has_codex_auth_json=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$SUDDEN_AGENT_AUTH_FILE" ]] && echo "has_auth_file=true" >> "$GITHUB_OUTPUT" || echo "has_auth_file=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_api_key=true" >> "$GITHUB_OUTPUT" || echo "has_api_key=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$CODEX_AUTH_JSON" || -n "$SUDDEN_AGENT_AUTH_FILE" || -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
 
       - name: Skip when agent auth is unavailable
         if: steps.agent_auth.outputs.has_auth != 'true'
-        run: echo "CODEX_AUTH_JSON or Sudden Agent auth is not configured; skipping agent hardening."
+        run: echo "CODEX_AUTH_JSON is not configured; skipping agent hardening."
 
       - name: Check workflow agent GitHub App auth
         id: app_auth
@@ -152,45 +148,3 @@ jobs:
 
             Never add secrets, private runbooks, Nostr secret keys, wallet
             credentials, raw logs, or unbounded user text to tracked files.
-
-      - name: Run Sudden Agent hardening with auth file
-        if: steps.agent_auth.outputs.has_codex_auth_json != 'true' && steps.agent_auth.outputs.has_auth_file == 'true'
-        uses: sudden-network/agent@v1.13.1
-        with:
-          agent_auth_file: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
-          github_token: ${{ steps.app_token.outputs.token }}
-          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
-          model: gpt-5.4/xhigh
-          resume: true
-          sudo: true
-          prompt: |
-            You are hardening PR #${{ inputs.pr_number }} for Conduit relay.
-
-            Task:
-            ${{ inputs.task }}
-
-            Risk class: ${{ steps.maintainer_gate.outputs.risk_class }}
-
-            Follow the same scoped hardening rules and validation requirements
-            as the CODEX_AUTH_JSON path in this workflow.
-
-      - name: Run Sudden Agent hardening with API key
-        if: steps.agent_auth.outputs.has_codex_auth_json != 'true' && steps.agent_auth.outputs.has_auth_file != 'true' && steps.agent_auth.outputs.has_api_key == 'true'
-        uses: sudden-network/agent@v1.13.1
-        with:
-          agent_api_key: ${{ secrets.SUDDEN_AGENT_API_KEY }}
-          github_token: ${{ steps.app_token.outputs.token }}
-          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
-          model: gpt-5.4/xhigh
-          resume: true
-          sudo: true
-          prompt: |
-            You are hardening PR #${{ inputs.pr_number }} for Conduit relay.
-
-            Task:
-            ${{ inputs.task }}
-
-            Risk class: ${{ steps.maintainer_gate.outputs.risk_class }}
-
-            Follow the same scoped hardening rules and validation requirements
-            as the CODEX_AUTH_JSON path in this workflow.

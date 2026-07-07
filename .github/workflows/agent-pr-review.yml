@@ -45,18 +45,14 @@ jobs:
         shell: bash
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-          SUDDEN_AGENT_AUTH_FILE: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
-          SUDDEN_AGENT_API_KEY: ${{ secrets.SUDDEN_AGENT_API_KEY }}
         run: |
           set -euo pipefail
           [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_codex_auth_json=true" >> "$GITHUB_OUTPUT" || echo "has_codex_auth_json=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$SUDDEN_AGENT_AUTH_FILE" ]] && echo "has_auth_file=true" >> "$GITHUB_OUTPUT" || echo "has_auth_file=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_api_key=true" >> "$GITHUB_OUTPUT" || echo "has_api_key=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$CODEX_AUTH_JSON" || -n "$SUDDEN_AGENT_AUTH_FILE" || -n "$SUDDEN_AGENT_API_KEY" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
 
       - name: Skip when agent auth is unavailable
         if: steps.agent_auth.outputs.has_auth != 'true'
-        run: echo "CODEX_AUTH_JSON or Sudden Agent auth is not configured; skipping agent review."
+        run: echo "CODEX_AUTH_JSON is not configured; skipping agent review."
 
       - uses: actions/checkout@v7
         if: steps.agent_auth.outputs.has_auth == 'true'
@@ -102,7 +98,6 @@ jobs:
       - name: Run Sudden Agent review with CODEX_AUTH_JSON
         id: review_codex_auth_json
         if: steps.agent_auth.outputs.has_codex_auth_json == 'true'
-        continue-on-error: ${{ steps.agent_auth.outputs.has_auth_file == 'true' || steps.agent_auth.outputs.has_api_key == 'true' }}
         uses: sudden-network/agent@v1.13.1
         with:
           agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
@@ -133,43 +128,3 @@ jobs:
             references. For small safe fixes on changed lines, include a
             GitHub ```suggestion block. If there are no blocking findings, say
             so explicitly and list residual test or runtime risks.
-
-      - name: Run Sudden Agent review with auth file
-        id: review_auth_file
-        if: >-
-          steps.agent_auth.outputs.has_auth_file == 'true' &&
-          (steps.agent_auth.outputs.has_codex_auth_json != 'true' ||
-            steps.review_codex_auth_json.outcome == 'failure')
-        continue-on-error: ${{ steps.agent_auth.outputs.has_api_key == 'true' }}
-        uses: sudden-network/agent@v1.13.1
-        with:
-          agent_auth_file: ${{ secrets.SUDDEN_AGENT_AUTH_FILE }}
-          github_token: ${{ steps.app_token.outputs.token }}
-          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
-          model: gpt-5.4/xhigh
-          resume: true
-          prompt: |
-            You are reviewing a Conduit relay pull request.
-            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-            Follow the same read-only review rules, priorities, and output
-            format as the CODEX_AUTH_JSON path in this workflow.
-
-      - name: Run Sudden Agent review with API key
-        if: >-
-          steps.agent_auth.outputs.has_api_key == 'true' &&
-          (steps.agent_auth.outputs.has_codex_auth_json != 'true' ||
-            steps.review_codex_auth_json.outcome == 'failure') &&
-          (steps.agent_auth.outputs.has_auth_file != 'true' ||
-            steps.review_auth_file.outcome == 'failure')
-        uses: sudden-network/agent@v1.13.1
-        with:
-          agent_api_key: ${{ secrets.SUDDEN_AGENT_API_KEY }}
-          github_token: ${{ steps.app_token.outputs.token }}
-          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
-          model: gpt-5.4/xhigh
-          resume: true
-          prompt: |
-            You are reviewing a Conduit relay pull request.
-            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-            Follow the same read-only review rules, priorities, and output
-            format as the CODEX_AUTH_JSON path in this workflow.
