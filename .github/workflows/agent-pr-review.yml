@@ -98,7 +98,7 @@ jobs:
       - name: Run Sudden Agent review with CODEX_AUTH_JSON
         id: review_codex_auth_json
         if: steps.agent_auth.outputs.has_codex_auth_json == 'true'
-        uses: sudden-network/agent@v1.13.1
+        uses: sudden-network/agent@v1.14.1
         with:
           agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
           github_token: ${{ steps.app_token.outputs.token }}
