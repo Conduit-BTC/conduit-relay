@@ -229,15 +229,24 @@ nak req -k 30402 -l 10 --search 'conduit-l2:q=apple;sort=newest' ws://127.0.0.1:
 nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc;partial=1' ws://127.0.0.1:3334
 ```
 
-7) Show protected read behavior for `kind:1059`:
+7) Show fail-closed behavior for an unscoped `kind:1059` read:
 
 ```bash
 nak req -k 1059 ws://127.0.0.1:3334
 ```
 
-Without NIP-42 auth, this should return an `auth-required` closure.
+This request is intentionally invalid: gift-wrap reads require NIP-42 authentication and an exact recipient filter. A valid client flow is:
 
-Deleted product revisions are filtered out of accelerated browse results. This package currently advertises browse/search/sort behavior plus protected `kind:1059` gating; it does not advertise separate product-detail or profile-lookup acceleration.
+1. Handle the relay's `AUTH` challenge.
+2. Sign and send a kind `22242` authentication event containing the exact relay URL and challenge.
+3. Wait for the successful `OK`, then retry the read as `{"kinds":[1059],"#p":["<authenticated 32-byte lowercase hex pubkey>"]}`.
+4. Authorization follows the most recently successful identity on that WebSocket. Existing protected subscriptions are re-checked on every delivery after an identity change.
+
+Unfiltered, wildcard, mixed-kind, malformed, multi-recipient, and mismatched-recipient gift-wrap reads are rejected or suppressed. Kindless subscriptions are rejected because backend result limits could otherwise expose protected activity even after event filtering. Protected counts and protected negentropy are deliberately unsupported. Public subscriptions remain available when they explicitly request public kinds.
+
+The product's relay-read loop must implement the challenge/sign/send/wait/retry sequence above before this relay policy is rolled out. Deploy the product support first, then the relay, then verify stored and live A/B isolation in production. Do not describe a deployment as recipient-restricted until that verification passes.
+
+Deleted product revisions are filtered out of accelerated browse results. This package currently advertises browse/search/sort behavior plus recipient-authorized `kind:1059` reads; it does not advertise separate product-detail or profile-lookup acceleration.
 
 ## One-command demo and validation
 
@@ -247,4 +256,4 @@ From this project root:
 ./run_demo.sh
 ```
 
-The script starts the demo relay, publishes test products, validates sorting and text filtering, and checks auth-gating for `kind:1059`.
+The script starts the demo relay, publishes test products, validates sorting and text filtering, and checks that an unauthenticated/unscoped `kind:1059` request fails closed.

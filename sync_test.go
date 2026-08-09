@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/slicestore"
-	"fiatjaf.com/nostr/khatru"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,7 +62,9 @@ func TestRelaySyncerHandleIncomingEventStoresAndBroadcastsLatest(t *testing.T) {
 func TestRelaySyncerBackfillAdvancesState(t *testing.T) {
 	relay, _ := newSyncTestRelay(t)
 	sk := nostr.Generate()
-	evt := signedProductEvent(t, sk, 1700000100, "banana", `{"title":"Banana","summary":"fresh","price":7,"currency":"USD","updatedAt":1700000100}`)
+	backfillStart := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	eventCreatedAt := backfillStart.Add(30 * time.Minute).Unix()
+	evt := signedProductEvent(t, sk, eventCreatedAt, "banana", `{"title":"Banana","summary":"fresh","price":7,"currency":"USD"}`)
 
 	pool := stubSyncPool{
 		fetchMany: func(ctx context.Context, urls []string, filter nostr.Filter, _ nostr.SubscriptionOptions) chan nostr.RelayEvent {
@@ -87,7 +89,7 @@ func TestRelaySyncerBackfillAdvancesState(t *testing.T) {
 			Enabled:          true,
 			Relays:           []string{"wss://relay.example"},
 			StatePath:        statePath,
-			BackfillSince:    time.Unix(1700000000, 0).UTC(),
+			BackfillSince:    backfillStart,
 			BackfillWindow:   time.Hour,
 			FetchLimit:       10,
 			VerifySignatures: true,
@@ -103,7 +105,7 @@ func TestRelaySyncerBackfillAdvancesState(t *testing.T) {
 	require.NoError(t, err)
 	var state syncState
 	require.NoError(t, json.Unmarshal(b, &state))
-	require.Greater(t, state.SyncedUntil, int64(1700000000))
+	require.Greater(t, state.SyncedUntil, backfillStart.Unix())
 }
 
 func TestRelaySyncerStreamLiveUsesRecentOverlap(t *testing.T) {
@@ -164,6 +166,11 @@ func connectRelayForSyncTest(t *testing.T, relay *khatru.Relay) (*nostr.Relay, *
 	require.NoError(t, err)
 	sub, err := client.Subscribe(t.Context(), nostr.Filter{Kinds: []nostr.Kind{30402}, Limit: 10}, nostr.SubscriptionOptions{})
 	require.NoError(t, err)
+	select {
+	case <-sub.EndOfStoredEvents:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for initial subscription query")
+	}
 	return client, sub
 }
 

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"conduitl2"
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr/eventstore"
 	"fiatjaf.com/nostr/eventstore/boltdb"
-	"fiatjaf.com/nostr/khatru"
 )
 
 func main() {

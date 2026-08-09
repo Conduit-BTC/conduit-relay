@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/slicestore"
-	"fiatjaf.com/nostr/khatru"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,8 +21,8 @@ func TestScope2E2E_ProductBrowseSortAndCursor(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	base := relay.QueryStored
 	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2, MaxProjectionScan: 200})
+	base := relay.QueryStored
 	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2, MaxProjectionScan: 200})
 
 	srv := httptest.NewServer(relay)
@@ -81,8 +81,8 @@ func TestScope2E2E_ProductBrowseOmitsDeletedLatestRevision(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	base := relay.QueryStored
 	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	base := relay.QueryStored
 	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
 
 	srv := httptest.NewServer(relay)
@@ -123,8 +123,8 @@ func TestScope2E2E_ProductBrowseSearchesAndSortsTagOnlyProducts(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	base := relay.QueryStored
 	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	base := relay.QueryStored
 	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
 
 	srv := httptest.NewServer(relay)
@@ -173,7 +173,7 @@ func TestScope2E2E_ProductBrowseSearchesAndSortsTagOnlyProducts(t *testing.T) {
 	require.Equal(t, []nostr.ID{banana.ID, carrot.ID, apple.ID}, eventIDs(pageAll))
 }
 
-func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
+func TestScope2E2E_ProtectedKindRequiresRecipientScopedNIP42AndNIP11Advertises(t *testing.T) {
 	relay := khatru.NewRelay()
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
@@ -227,7 +227,11 @@ func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	blockedSub, err := unauth.Subscribe(ctx, nostr.Filter{Kinds: []nostr.Kind{1059}}, nostr.SubscriptionOptions{})
+	recipientA := nostr.Generate()
+	recipientB := nostr.Generate()
+	filterA := nostr.Filter{Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{recipientA.Public().Hex()}}}
+
+	blockedSub, err := unauth.Subscribe(ctx, filterA, nostr.SubscriptionOptions{})
 	require.NoError(t, err)
 	defer blockedSub.Unsub()
 
@@ -238,16 +242,11 @@ func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 		t.Fatal("expected CLOSED auth-required")
 	}
 
-	sk := nostr.Generate()
-	authd, err := nostr.RelayConnect(t.Context(), url, nostr.RelayOptions{
-		AuthHandler: func(ctx context.Context, _ *nostr.Relay, evt *nostr.Event) error {
-			return evt.Sign(sk)
-		},
-	})
+	authd, err := nostr.RelayConnect(t.Context(), url, nostr.RelayOptions{})
 	require.NoError(t, err)
 	defer authd.Close()
 
-	firstTry, err := authd.Subscribe(ctx, nostr.Filter{Kinds: []nostr.Kind{1059}}, nostr.SubscriptionOptions{})
+	firstTry, err := authd.Subscribe(ctx, filterA, nostr.SubscriptionOptions{})
 	require.NoError(t, err)
 	defer firstTry.Unsub()
 
@@ -257,10 +256,13 @@ func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("expected initial auth-required CLOSED before auth retry")
 	}
+	require.NoError(t, authd.Auth(ctx, func(_ context.Context, evt *nostr.Event) error {
+		return evt.Sign(recipientA)
+	}))
 
 	var authedOK bool
 	for range 8 {
-		okSub, err := authd.Subscribe(ctx, nostr.Filter{Kinds: []nostr.Kind{1059}}, nostr.SubscriptionOptions{})
+		okSub, err := authd.Subscribe(ctx, filterA, nostr.SubscriptionOptions{})
 		require.NoError(t, err)
 
 		select {
@@ -283,6 +285,33 @@ func TestScope2E2E_ProtectedKindRequiresNIP42AndNIP11Advertises(t *testing.T) {
 
 doneAuth:
 	require.True(t, authedOK)
+
+	for name, filter := range map[string]nostr.Filter{
+		"unfiltered":          {Kinds: []nostr.Kind{1059}},
+		"mismatched":          {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{recipientB.Public().Hex()}}},
+		"missing recipient":   {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{}},
+		"empty recipient":     {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{}}},
+		"invalid recipient":   {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{"not-a-pubkey"}}},
+		"multiple recipients": {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{recipientA.Public().Hex(), recipientB.Public().Hex()}}},
+		"duplicate recipient": {Kinds: []nostr.Kind{1059}, Tags: nostr.TagMap{"p": []string{recipientA.Public().Hex(), recipientA.Public().Hex()}}},
+		"mixed kinds":         {Kinds: []nostr.Kind{1059, 1}, Tags: nostr.TagMap{"p": []string{recipientA.Public().Hex()}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sub, err := authd.Subscribe(ctx, filter, nostr.SubscriptionOptions{})
+			require.NoError(t, err)
+			defer sub.Unsub()
+
+			select {
+			case reason := <-sub.ClosedReason:
+				require.NotContains(t, reason, recipientA.Public().Hex())
+				require.NotContains(t, reason, recipientB.Public().Hex())
+			case <-sub.EndOfStoredEvents:
+				t.Fatal("expected recipient-invalid subscription to be rejected")
+			case <-ctx.Done():
+				t.Fatal("expected recipient-invalid subscription to be rejected")
+			}
+		})
+	}
 }
 
 func productEvent(t *testing.T, sk nostr.SecretKey, createdAt int64, dTag, content string) nostr.Event {

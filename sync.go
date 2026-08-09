@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/khatru"
 )
 
 const (
