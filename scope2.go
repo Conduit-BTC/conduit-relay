@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/khatru"
 	"fiatjaf.com/nostr/nip11"
 )
 
@@ -142,12 +142,6 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			}
 		}
 
-		if requestsProtectedGiftWraps(filter) {
-			if _, authed := khatru.GetAuthed(ctx); !authed {
-				return true, "auth-required: kind 1059 requests require NIP-42 authentication"
-			}
-		}
-
 		if requestsOutOfScopeSearch(filter) {
 			return true, "blocked: use conduit-l2 capability search format"
 		}
@@ -163,6 +157,9 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 
 		return false, ""
 	}
+
+	configureGiftWrapProtection(relay)
+	registerScope2State(relay.QueryStored, state)
 }
 
 func WrapProductQueries(baseQuery StoreQuery, opts Scope2Options) StoreQuery {
