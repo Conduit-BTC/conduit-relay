@@ -150,7 +150,7 @@ func TestGiftWrapProtectionChallengeOnlyOffersAuthAfterPriorPolicy(t *testing.T)
 
 func TestGiftWrapProtectionNIP11TagRequiresEnforcement(t *testing.T) {
 	for _, test := range []struct {
-		mode            GiftWrapProtectionMode
+		mode           GiftWrapProtectionMode
 		wantProtection bool
 	}{
 		{mode: GiftWrapProtectionDisabled},
