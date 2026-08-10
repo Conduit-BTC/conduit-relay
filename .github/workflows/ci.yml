@@ -1,0 +1,86 @@
+name: Go CI
+
+on:
+  push:
+    branches:
+      - main
+      - "agent/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROOT_TEST_PATTERN: "^(TestScope2E2E_ProductBrowse|TestParseSearchPlan|TestRequestsOutOfScopeSearch|TestProjection|TestEvaluate|TestBuildProductEnvelope|TestCursorRoundTrip|TestRelaySyncer|TestTargetsProductDeletion|TestParseGiftWrapProtection|TestGiftWrapProtection)"
+
+jobs:
+  static:
+    name: Format, vet, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        shell: bash
+        run: |
+          mapfile -t go_files < <(git ls-files '*.go')
+          unformatted="$(gofmt -l "${go_files[@]}")"
+          if [[ -n "$unformatted" ]]; then
+            printf 'Unformatted Go files:\n%s\n' "$unformatted"
+            gofmt -d "${go_files[@]}"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+
+  test:
+    name: Ordinary unit and local product tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test root package
+        run: go test -count=1 . -run "$ROOT_TEST_PATTERN"
+      - name: Test runtime configuration
+        run: go test -count=1 ./cmd/demo
+      - name: Test canonical AUTH acceptance
+        run: go test -count=1 ./third_party/khatru -run '^TestValidateAuthEventAcceptsCanonicalEmptyContent$'
+
+  race:
+    name: Race-check ordinary unit and local product tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Race-check root package
+        run: go test -race -count=1 . -run "$ROOT_TEST_PATTERN"
+      - name: Race-check runtime configuration
+        run: go test -race -count=1 ./cmd/demo
+      - name: Race-check canonical AUTH acceptance
+        run: go test -race -count=1 ./third_party/khatru -run '^TestValidateAuthEventAcceptsCanonicalEmptyContent$'

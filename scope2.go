@@ -27,12 +27,47 @@ const (
 	SortUpdatedAtDesc ProductSort = "updated_at_desc"
 )
 
+type GiftWrapProtectionMode uint8
+
+const (
+	GiftWrapProtectionDisabled GiftWrapProtectionMode = iota
+	GiftWrapProtectionChallengeOnly
+	GiftWrapProtectionEnforce
+)
+
+func ParseGiftWrapProtectionMode(raw string) (GiftWrapProtectionMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "disabled":
+		return GiftWrapProtectionDisabled, nil
+	case "challenge-only":
+		return GiftWrapProtectionChallengeOnly, nil
+	case "enforce":
+		return GiftWrapProtectionEnforce, nil
+	default:
+		return GiftWrapProtectionDisabled, fmt.Errorf("unknown NIP-42 gift-wrap mode %q", raw)
+	}
+}
+
+func (mode GiftWrapProtectionMode) String() string {
+	switch mode {
+	case GiftWrapProtectionDisabled:
+		return "disabled"
+	case GiftWrapProtectionChallengeOnly:
+		return "challenge-only"
+	case GiftWrapProtectionEnforce:
+		return "enforce"
+	default:
+		return "invalid"
+	}
+}
+
 type Scope2Options struct {
 	MaxQueryLimit          int
 	DefaultQueryLimit      int
 	MaxProjectionScan      int
 	AllowMixedCurrencySort bool
 	EnableNIP50            bool
+	GiftWrapProtection     GiftWrapProtectionMode
 }
 
 type StoreQuery func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event]
@@ -93,7 +128,7 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			info = prevInfo(ctx, r, info)
 		}
 
-		info.Tags = appendUnique(info.Tags,
+		policyTags := []string{
 			"conduit_l2",
 			"scope2-mvp",
 			"marketplace_product_browse",
@@ -104,8 +139,12 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			"sort:updated_at_desc",
 			"cursor:conduit-l2-v1",
 			"search_scope:bounded_commerce_search",
-			"protected_kind:1059",
-		)
+			"giftwrap_read_policy:" + opts.GiftWrapProtection.String(),
+		}
+		if opts.GiftWrapProtection == GiftWrapProtectionEnforce {
+			policyTags = append(policyTags, "protected_kind:1059")
+		}
+		info.Tags = appendUnique(info.Tags, policyTags...)
 
 		return info
 	}
@@ -158,7 +197,7 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 		return false, ""
 	}
 
-	configureGiftWrapProtection(relay)
+	configureGiftWrapProtection(relay, opts.GiftWrapProtection)
 	registerScope2State(relay.QueryStored, state)
 }
 
@@ -567,6 +606,14 @@ func appendUnique(target []string, values ...string) []string {
 }
 
 func withDefaults(opts *Scope2Options) {
+	switch opts.GiftWrapProtection {
+	case GiftWrapProtectionDisabled, GiftWrapProtectionChallengeOnly, GiftWrapProtectionEnforce:
+	default:
+		// The zero value is the intentional availability-safe rollout default.
+		// Any other unknown programmatic value fails closed instead of silently
+		// disabling recipient enforcement.
+		opts.GiftWrapProtection = GiftWrapProtectionEnforce
+	}
 	if opts.MaxQueryLimit <= 0 {
 		opts.MaxQueryLimit = 100
 	}

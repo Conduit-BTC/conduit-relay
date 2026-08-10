@@ -43,14 +43,14 @@ fi
 RELAY_URL="ws://127.0.0.1:$PORT"
 HTTP_URL="http://127.0.0.1:$PORT"
 
-echo "[1/6] Starting Scope2 demo relay..."
+echo "[1/5] Starting Scope2 demo relay..."
 (
   cd "$ROOT_DIR"
   PORT="$PORT" go run ./cmd/demo >"$LOG_FILE" 2>&1
 ) &
 relay_pid="$!"
 
-echo "[2/6] Waiting for relay startup..."
+echo "[2/5] Waiting for relay startup..."
 for _ in $(seq 1 80); do
   if curl -fsS -H 'Accept: application/nostr+json' "$HTTP_URL" >/dev/null 2>&1; then
     break
@@ -66,12 +66,12 @@ grep -q '"conduit_l2"' <<<"$relay_info_raw" || fail "NIP-11 does not expose cond
 sec="$(nak key generate | tr -d '\r\n')"
 [[ -n "$sec" ]] || fail "failed to generate signing key"
 
-echo "[3/6] Publishing demo products..."
+echo "[3/5] Publishing demo products..."
 nak event --sec "$sec" -k 30402 -d apple -c '{"title":"Apple","summary":"Red fruit","price":19,"currency":"USD","updatedAt":1000}' "$RELAY_URL" >/dev/null
 nak event --sec "$sec" -k 30402 -d banana -c '{"title":"Banana","summary":"Yellow fruit","price":7,"currency":"USD","updatedAt":1001}' "$RELAY_URL" >/dev/null
 nak event --sec "$sec" -k 30402 -d carrot -c '{"title":"Carrot","summary":"Orange root","price":12,"currency":"USD","updatedAt":1002}' "$RELAY_URL" >/dev/null
 
-echo "[4/6] Verifying deterministic price sort..."
+echo "[4/5] Verifying deterministic price sort..."
 sorted_output="$(nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc' "$RELAY_URL")"
 sorted_prices="$(printf '%s\n' "$sorted_output" | python3 -c '
 import json,sys
@@ -101,7 +101,7 @@ print(" ".join(prices))
 ')"
 [[ "$sorted_prices" == "7 12 19" ]] || fail "unexpected price order: '$sorted_prices'"
 
-echo "[5/6] Verifying text query behavior..."
+echo "[5/5] Verifying text query behavior..."
 apple_output="$(nak req -k 30402 -l 10 --search 'conduit-l2:q=apple;sort=newest' "$RELAY_URL")"
 apple_titles="$(printf '%s\n' "$apple_output" | python3 -c '
 import json,sys
@@ -131,9 +131,5 @@ for line in sys.stdin:
 print("|".join(titles))
 ')"
 [[ "$apple_titles" == "Apple" ]] || fail "unexpected text-query titles: '$apple_titles'"
-
-echo "[6/6] Verifying protected kind gating (NIP-42 required)..."
-protected_output="$(nak req -k 1059 "$RELAY_URL" 2>&1 || true)"
-grep -q 'auth-required' <<<"$protected_output" || fail "kind 1059 query was not auth-gated"
 
 echo "[OK] Scope2 demo script finished successfully."
