@@ -1,0 +1,385 @@
+name: Agent Simplify Review
+
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/agent simplify' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review' &&
+        github.event.review.user.login == 'conduit-sudden-agent[bot]' &&
+        contains(github.event.review.body, '<!-- conduit:sudden-review clean head='))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      should_run: ${{ steps.pr.outputs.should_run }}
+    steps:
+      - name: Validate pull request and trigger
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          TRIGGER_REVIEW_ID: ${{ github.event.review.id }}
+          TRIGGER_COMMIT_ID: ${{ github.event.review.commit_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Pull request number must be a positive integer." >&2
+            exit 1
+          fi
+
+          metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json baseRefName,headRefOid,isCrossRepository,isDraft,state \
+            --jq '[.baseRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // ""] | join("\u001f")')"
+          IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state <<< "$metadata"
+
+          if [[ "$is_cross_repo" == "true" ]]; then
+            echo "Simplify review is disabled for cross-repository pull requests." >&2
+            exit 1
+          fi
+          if [[ "$base_ref" != "main" ]]; then
+            echo "Simplify review requires a pull request targeting main." >&2
+            exit 1
+          fi
+          if [[ "$is_draft" == "true" ]]; then
+            echo "Simplify review requires a ready pull request." >&2
+            exit 1
+          fi
+          if [[ "$state" != "OPEN" || -z "$head_sha" ]]; then
+            echo "Simplify review requires an open pull request with a resolvable head SHA." >&2
+            exit 1
+          fi
+
+          should_run=true
+
+          skip_automatic_handoff() {
+            echo "$1"
+            echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request_review" ]]; then
+            if [[ ! "$TRIGGER_REVIEW_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Automatic simplify review requires a valid source review ID." >&2
+              exit 1
+            fi
+            if [[ "$TRIGGER_COMMIT_ID" != "$head_sha" ]]; then
+              skip_automatic_handoff "The clean review is stale; skipping Ponytail."
+            fi
+
+            review="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$TRIGGER_REVIEW_ID")"
+            reviewer="$(jq -r '.user.login // ""' <<< "$review")"
+            review_commit="$(jq -r '.commit_id // ""' <<< "$review")"
+            review_body="$(jq -r '.body // ""' <<< "$review")"
+            clean_marker="<!-- conduit:sudden-review clean head=$head_sha -->"
+            clean_summary="No actionable findings."
+
+            if [[ "$review_commit" != "$head_sha" ]]; then
+              skip_automatic_handoff "The source review is stale; skipping Ponytail."
+            fi
+            if [[ "$reviewer" != "conduit-sudden-agent[bot]" ]]; then
+              echo "Automatic simplify review requires the Sudden Agent reviewer." >&2
+              exit 1
+            fi
+            if [[ "$review_body" != *"$clean_marker"* ]]; then
+              echo "The source review does not contain the exact clean-review marker." >&2
+              exit 1
+            fi
+            if ! grep -Fqx "$clean_summary" <<< "$review_body"; then
+              echo "The source review does not contain the exact clean-review summary." >&2
+              exit 1
+            fi
+
+            review_comment_count="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$TRIGGER_REVIEW_ID/comments?per_page=100" |
+                jq -s 'map(length) | add // 0'
+            )"
+            if [[ "$review_comment_count" != "0" ]]; then
+              echo "The source review contains inline findings; Ponytail will not run." >&2
+              exit 1
+            fi
+
+            # Deliberately PR-wide: a response commit or failed first attempt
+            # must not rearm Ponytail. Maintainers can request an explicit rerun.
+            previous_ponytail_reviews="$(
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" |
+                jq -s --arg marker '<!-- conduit:ponytail-' \
+                  '[.[][] | select((.user.login == "conduit-sudden-agent[bot]") and (((.body // "") | contains($marker))))] | length'
+            )"
+            if (( previous_ponytail_reviews > 0 )); then
+              echo "An automatic Ponytail attempt already exists; skipping the automatic rerun."
+              should_run=false
+            fi
+          fi
+
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
+
+  simplify:
+    needs: preflight
+    if: >-
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: agent-ponytail-final-${{ needs.preflight.outputs.number }}
+      queue: max
+    steps:
+      - name: Revalidate queued handoff
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.preflight.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          TRIGGER_REVIEW_ID: ${{ github.event.review.id }}
+        run: |
+          set -euo pipefail
+
+          metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json baseRefName,headRefOid,isCrossRepository,isDraft,state \
+            --jq '[.baseRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // ""] | join("\u001f")')"
+          IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state <<< "$metadata"
+
+          skip_queued_handoff() {
+            echo "$1"
+            echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [[ "$is_cross_repo" == "true" || "$base_ref" != "main" ||
+            "$is_draft" == "true" || "$state" != "OPEN" || -z "$head_sha" ]]; then
+            skip_queued_handoff "The pull request is no longer eligible; skipping Ponytail."
+          fi
+          if [[ "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+            skip_queued_handoff "The pull request head changed while queued; skipping Ponytail."
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request_review" ]]; then
+            if [[ ! "$TRIGGER_REVIEW_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Automatic simplify review requires a valid source review ID." >&2
+              exit 1
+            fi
+
+            review="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$TRIGGER_REVIEW_ID")"
+            reviewer="$(jq -r '.user.login // ""' <<< "$review")"
+            review_commit="$(jq -r '.commit_id // ""' <<< "$review")"
+            review_body="$(jq -r '.body // ""' <<< "$review")"
+            clean_marker="<!-- conduit:sudden-review clean head=$head_sha -->"
+            clean_summary="No actionable findings."
+
+            if [[ "$reviewer" != "conduit-sudden-agent[bot]" ||
+              "$review_commit" != "$head_sha" ||
+              "$review_body" != *"$clean_marker"* ]]; then
+              echo "The queued clean-review handoff failed revalidation." >&2
+              exit 1
+            fi
+            if ! grep -Fqx "$clean_summary" <<< "$review_body"; then
+              echo "The queued source review lacks the exact clean-review summary." >&2
+              exit 1
+            fi
+
+            review_comment_count="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$TRIGGER_REVIEW_ID/comments?per_page=100" |
+                jq -s 'map(length) | add // 0'
+            )"
+            if [[ "$review_comment_count" != "0" ]]; then
+              echo "The queued source review contains inline findings." >&2
+              exit 1
+            fi
+
+            previous_ponytail_reviews="$(
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" |
+                jq -s --arg marker '<!-- conduit:ponytail-' \
+                  '[.[][] | select((.user.login == "conduit-sudden-agent[bot]") and (((.body // "") | contains($marker))))] | length'
+            )"
+            if (( previous_ponytail_reviews > 0 )); then
+              skip_queued_handoff "An automatic Ponytail attempt now exists; skipping the queued rerun."
+            fi
+          fi
+
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub App review token
+        id: app_token
+        if: steps.pr.outputs.should_run == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: write
+
+      - name: Reserve automatic Ponytail attempt
+        if: steps.pr.outputs.should_run == 'true' && github.event_name == 'pull_request_review'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          marker="<!-- conduit:ponytail-attempted head=$HEAD_SHA -->"
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            -f event=COMMENT \
+            -f commit_id="$HEAD_SHA" \
+            -f body="$marker"$'\n\n''Automatic final Ponytail review started.' \
+            --silent
+
+      - name: Require automation credentials
+        if: steps.pr.outputs.should_run == 'true'
+        shell: bash
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GITHUB_APP_CLIENT_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CODEX_AUTH_JSON" ]] || { echo "CODEX_AUTH_JSON is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_CLIENT_ID" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_PRIVATE_KEY" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY is required." >&2; exit 1; }
+
+      - name: Checkout immutable pull request head
+        if: steps.pr.outputs.should_run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.pr.outputs.head_sha }}
+
+      - name: Stage pinned Ponytail review skill
+        id: ponytail_skill
+        if: steps.pr.outputs.should_run == 'true'
+        shell: bash
+        env:
+          PONYTAIL_SKILL_URL: https://raw.githubusercontent.com/DietrichGebert/ponytail/0a4dd63ad4541f4f655c4108a295916f3c1d8fda/skills/ponytail-review/SKILL.md
+          PONYTAIL_SKILL_SHA256: 40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0
+        run: |
+          set -euo pipefail
+          skill_download="$(mktemp "$RUNNER_TEMP/ponytail-review.XXXXXX")"
+          skill_directory="$HOME/.agents/skills/ponytail-review"
+          skill_path="$skill_directory/SKILL.md"
+          trap 'rm -f "$skill_download"' EXIT
+
+          for candidate in "$HOME/.agents" "$HOME/.agents/skills" "$skill_directory" "$skill_path"; do
+            if [[ -L "$candidate" ]]; then
+              echo "Refusing a symlink in the runner-owned Ponytail skill path." >&2
+              exit 1
+            fi
+          done
+          if [[ -e "$skill_path" ]]; then
+            echo "Refusing to overwrite an existing runner skill." >&2
+            exit 1
+          fi
+
+          install -d -m 0700 "$skill_directory"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "$PONYTAIL_SKILL_URL" --output "$skill_download"
+          printf '%s  %s\n' "$PONYTAIL_SKILL_SHA256" "$skill_download" | sha256sum --check --strict
+          install -m 0600 "$skill_download" "$skill_path"
+          echo "skill_path=$skill_path" >> "$GITHUB_OUTPUT"
+
+      - name: Run final Ponytail review
+        if: steps.pr.outputs.should_run == 'true'
+        uses: sudden-network/agent@2afabe84ac9bf58e57f605b41b2c4f87bbe9c579 # v1.14.1
+        with:
+          agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
+          model: ${{ vars.WORKFLOW_AGENT_CODEX_MODEL || 'gpt-5.6-sol/xhigh' }}
+          resume: false
+          prompt: |
+            Use the
+            [$ponytail-review](${{ steps.ponytail_skill.outputs.skill_path }})
+            skill to perform one read-only final simplicity review of
+            Conduit-BTC/conduit-relay PR
+            #${{ steps.pr.outputs.number }} at head
+            ${{ steps.pr.outputs.head_sha }}. Review the complete base-to-head
+            diff. Do not edit files, push, change labels, merge, deploy, request
+            reviewers, or update external systems.
+
+            Read AGENTS.md, contributor guidance, the changed files, and their
+            callers before judging the diff. Apply the skill only to concrete,
+            behavior-preserving reductions. Preserve repository ownership
+            boundaries, validation, error handling, security, accessibility,
+            observability, documentation, migrations, generated artifacts, and
+            required tests.
+
+            Conduit relay boundaries:
+            - Prefer existing relay hooks and the pinned Khatru fork over new
+              parallel policy layers.
+            - Do not simplify away Nostr interoperability, recipient isolation,
+              authentication checks, internal-call boundaries, concurrency
+              controls, storage safety, deterministic tests, or deployment gates.
+            - Treat kind-1059 metadata protection and NIP-42 behavior as privacy
+              and compatibility boundaries.
+            - Do not expose event payloads, message content, credentials, signer
+              material, wallet data, or private operational context.
+
+            Review delivery contract:
+            - Before submitting, inspect existing unresolved inline Ponytail or
+              simplify findings. Do not duplicate an equivalent finding.
+            - Immediately before submission, fetch the pull request again. If
+              its head is not `${{ steps.pr.outputs.head_sha }}`, stop without
+              submitting a review.
+            - Submit review feedback through one GitHub pull request review, not
+              PR Conversation or issue comments.
+            - Use `github.octokit_request` with
+              `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` for the
+              final review submission. Include `event: "COMMENT"`,
+              `commit_id: "${{ steps.pr.outputs.head_sha }}"`, and a concise
+              `body` so GitHub submits the review immediately.
+            - Every actionable simplification must be an inline PR review
+              comment on a changed file and line. Use `comments[].body`,
+              `comments[].path`, `comments[].line`, and `comments[].side`. Use
+              `"RIGHT"` for additions or context and `"LEFT"` for deletions.
+            - For a finding spanning multiple files, anchor the inline comment
+              on the primary changed line. Mention related files in that body.
+            - Do not post actionable findings as issue comments or PR
+              Conversation comments. If an inline PR review cannot be submitted,
+              leave no top-level finding. State the delivery blocker in the PR
+              review body.
+            - Keep the review body to a concise outcome, the skill's net line
+              metric, and residual test or release risks. Do not duplicate
+              actionable finding detail there.
+            - Always include
+              `<!-- conduit:ponytail-final head=${{ steps.pr.outputs.head_sha }} -->`
+              in the review body. This marker makes the automatic handoff run
+              once for this pull request. The head records review provenance.
+            - If there is nothing to cut, include the marker, say
+              `Lean already. Ship.`, and stop.
