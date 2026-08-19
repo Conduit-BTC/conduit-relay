@@ -268,9 +268,9 @@ recipient enforcement is active.
 
 The AUTH event must have kind `22242`, a fresh timestamp, the current
 connection challenge, the externally visible relay URL, a valid signature and
-canonical transmitted event ID, and empty content. For a custom domain or TLS
-proxy, keep the relay in `disabled` until the URL derived by the relay matches
-the URL signed by clients.
+canonical transmitted event ID. NIP-42 does not constrain its content. For a
+custom domain or TLS proxy, keep the relay in `disabled` until the URL derived
+by the relay matches the URL signed by clients.
 
 Controlled rollout order:
 

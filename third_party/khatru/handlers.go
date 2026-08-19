@@ -72,9 +72,6 @@ func validateAuthEvent(event nostr.Event, challenge, relayURL string) (nostr.Pub
 	if !event.CheckID() {
 		return nostr.ZeroPK, errors.New("event id is computed incorrectly")
 	}
-	if event.Content != "" {
-		return nostr.ZeroPK, errors.New("auth event content must be empty")
-	}
 	return nip42.ValidateAuthEvent(event, challenge, relayURL)
 }
 
