@@ -63,14 +63,14 @@ func TestGiftWrapStoredResultsFilterMaliciousBackend(t *testing.T) {
 	require.Contains(t, reason, "wildcard")
 }
 
-func TestGiftWrapStoredAndLiveRecipientIsolation(t *testing.T) {
+func TestDefaultGiftWrapProtectionEnforcesStoredAndLiveRecipientIsolation(t *testing.T) {
 	relay := khatru.NewRelay()
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 	authEvents := make(chan nostr.PubKey, 8)
 	relay.OnAuth = func(_ context.Context, pubkey nostr.PubKey) { authEvents <- pubkey }
-	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
+	ConfigureRelay(relay, Scope2Options{})
 
 	server := httptest.NewServer(relay)
 	defer server.Close()
