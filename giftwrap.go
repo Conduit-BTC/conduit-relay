@@ -23,16 +23,84 @@ const (
 	giftWrapKind = nostr.Kind(1059)
 
 	giftWrapAuthRequiredReason  = "auth-required: kind 1059 requests require NIP-42 authentication"
-	giftWrapMixedKindsReason    = "blocked: kind 1059 cannot be mixed with other kinds"
-	giftWrapRecipientReason     = "blocked: kind 1059 requests require exactly one valid recipient"
-	giftWrapIdentityReason      = "blocked: kind 1059 recipient does not match authenticated identity"
-	giftWrapCountReason         = "blocked: protected event counts are not supported"
-	giftWrapWildcardReadReason  = "blocked: wildcard subscriptions are not supported"
-	giftWrapWildcardCountReason = "blocked: wildcard counts are not supported"
+	giftWrapMixedKindsReason    = "restricted: kind 1059 cannot be mixed with other kinds"
+	giftWrapRecipientReason     = "restricted: kind 1059 requests require exactly one valid recipient"
+	giftWrapIdentityReason      = "restricted: kind 1059 recipient does not match authenticated identity"
+	giftWrapCountReason         = "restricted: protected event counts are not supported"
+	giftWrapWildcardReadReason  = "restricted: wildcard subscriptions are not supported"
+	giftWrapWildcardCountReason = "restricted: wildcard counts are not supported"
+	giftWrapNegentropyReason    = "restricted: protected event negentropy is not supported"
 	giftWrapWriteReason         = "blocked: kind 1059 events require exactly one valid recipient"
 )
 
-func configureGiftWrapProtection(relay *khatru.Relay) {
+func configureGiftWrapProtection(relay *khatru.Relay, mode GiftWrapProtectionMode) {
+	configureGiftWrapWriteValidation(relay)
+
+	switch mode {
+	case GiftWrapProtectionChallengeOnly:
+		configureGiftWrapChallengeHooks(relay, offerGiftWrapAuth)
+	case GiftWrapProtectionEnforce:
+		configureGiftWrapEnforcement(relay)
+	}
+}
+
+func configureGiftWrapWriteValidation(relay *khatru.Relay) {
+	prevEvent := relay.OnEvent
+	relay.OnEvent = func(ctx context.Context, event nostr.Event) (bool, string) {
+		if event.Kind == giftWrapKind {
+			if _, ok := soleGiftWrapRecipient(event); !ok {
+				return true, giftWrapWriteReason
+			}
+		}
+
+		if prevEvent != nil {
+			return prevEvent(ctx, event)
+		}
+		return false, ""
+	}
+}
+
+func configureGiftWrapChallengeHooks(relay *khatru.Relay, offerAuth func(context.Context)) {
+	prevRequest := relay.OnRequest
+	relay.OnRequest = func(ctx context.Context, filter nostr.Filter) (bool, string) {
+		if prevRequest != nil {
+			if reject, reason := prevRequest(ctx, filter); reject {
+				return true, reason
+			}
+		}
+
+		if requestsProtectedGiftWraps(filter) {
+			offerAuth(ctx)
+		}
+		return false, ""
+	}
+
+	prevCount := relay.OnCount
+	relay.OnCount = func(ctx context.Context, filter nostr.Filter) (bool, string) {
+		if prevCount != nil {
+			if reject, reason := prevCount(ctx, filter); reject {
+				return true, reason
+			}
+		}
+
+		if requestsProtectedGiftWraps(filter) {
+			offerAuth(ctx)
+		}
+		return false, ""
+	}
+}
+
+func offerGiftWrapAuth(ctx context.Context) {
+	if khatru.GetConnection(ctx) == nil {
+		return
+	}
+	if _, authenticated := khatru.GetAuthed(ctx); authenticated {
+		return
+	}
+	khatru.RequestAuth(ctx)
+}
+
+func configureGiftWrapEnforcement(relay *khatru.Relay) {
 	authRegistry := &giftWrapAuthRegistry{identities: make(map[*khatru.WebSocket]giftWrapConnectionIdentity)}
 
 	prevConnect := relay.OnConnect
@@ -67,20 +135,22 @@ func configureGiftWrapProtection(relay *khatru.Relay) {
 
 	prevRequest := relay.OnRequest
 	relay.OnRequest = func(ctx context.Context, filter nostr.Filter) (bool, string) {
+		if prevRequest != nil {
+			if reject, reason := prevRequest(ctx, filter); reject {
+				return true, reason
+			}
+		}
+
 		if len(filter.Kinds) == 0 {
 			return true, giftWrapWildcardReadReason
 		}
 		if requestsProtectedGiftWraps(filter) {
 			if khatru.IsNegentropySession(ctx) {
-				return true, "blocked: protected event negentropy is not supported"
+				return true, giftWrapNegentropyReason
 			}
 			if _, reason := authorizeGiftWrapFilter(ctx, filter, authRegistry); reason != "" {
 				return true, reason
 			}
-		}
-
-		if prevRequest != nil {
-			return prevRequest(ctx, filter)
 		}
 		return false, ""
 	}
@@ -125,20 +195,6 @@ func configureGiftWrapProtection(relay *khatru.Relay) {
 
 		if prevCount != nil {
 			return prevCount(ctx, filter)
-		}
-		return false, ""
-	}
-
-	prevEvent := relay.OnEvent
-	relay.OnEvent = func(ctx context.Context, event nostr.Event) (bool, string) {
-		if event.Kind == giftWrapKind {
-			if _, ok := soleGiftWrapRecipient(event); !ok {
-				return true, giftWrapWriteReason
-			}
-		}
-
-		if prevEvent != nil {
-			return prevEvent(ctx, event)
 		}
 		return false, ""
 	}

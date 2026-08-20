@@ -35,10 +35,11 @@ func main() {
 	relay.UseEventstore(store, 500)
 
 	opts := conduitl2.Scope2Options{
-		MaxQueryLimit:     100,
-		DefaultQueryLimit: 25,
-		MaxProjectionScan: 2000,
-		EnableNIP50:       true,
+		MaxQueryLimit:      100,
+		DefaultQueryLimit:  25,
+		MaxProjectionScan:  2000,
+		EnableNIP50:        true,
+		GiftWrapProtection: cfg.GiftWrapProtection,
 	}
 
 	conduitl2.ConfigureRelay(relay, opts)
@@ -62,6 +63,7 @@ func main() {
 		}
 	}()
 
+	log.Printf("gift-wrap read policy: %s", cfg.GiftWrapProtection)
 	log.Printf("listening on http://127.0.0.1:%s (ws://127.0.0.1:%s)", cfg.Port, cfg.Port)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("relay stopped: %v", err)

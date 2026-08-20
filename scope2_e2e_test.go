@@ -178,7 +178,7 @@ func TestScope2E2E_ProtectedKindRequiresRecipientScopedNIP42AndNIP11Advertises(t
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 200)
-	ConfigureRelay(relay, Scope2Options{})
+	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
 
 	srv := httptest.NewServer(relay)
 	defer srv.Close()

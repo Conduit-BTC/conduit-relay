@@ -6,6 +6,8 @@ local package so the required relay-framework fixes can be reviewed independentl
 
 - `OnAuth` runs synchronously while the connection authentication lock is held
   and before the relay sends the successful AUTH response.
+- AUTH events must have a canonical transmitted event ID in addition to the
+  pinned NIP-42 validator's signature and tag checks; content is unrestricted.
 - authentication getters read an immutable atomic snapshot instead of racing
   the AUTH handler's exported compatibility slice.
 - live broadcast and listener inspection use a per-relay listener lock,

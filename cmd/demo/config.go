@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,10 +14,11 @@ import (
 )
 
 type runtimeConfig struct {
-	Port      string
-	DataDir   string
-	StorePath string
-	Sync      conduitl2.SyncConfig
+	Port               string
+	DataDir            string
+	StorePath          string
+	GiftWrapProtection conduitl2.GiftWrapProtectionMode
+	Sync               conduitl2.SyncConfig
 }
 
 func loadRuntimeConfig() (runtimeConfig, error) {
@@ -24,6 +26,15 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 	dataDir := getenv("DATA_DIR", filepath.Join("tmp", "demo-data"))
 	storePath := filepath.Join(dataDir, "events.db")
 	statePath := filepath.Join(dataDir, "sync-state.json")
+	giftWrapProtection, err := conduitl2.ParseGiftWrapProtectionMode(os.Getenv("NIP42_GIFTWRAP_MODE"))
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	giftWrapSingleMachine := strings.TrimSpace(os.Getenv("GIFT_WRAP_SINGLE_MACHINE_ID"))
+	currentFlyMachine := strings.TrimSpace(os.Getenv("FLY_MACHINE_ID"))
+	if err := validateGiftWrapSingleMachine(giftWrapProtection, currentFlyMachine, giftWrapSingleMachine); err != nil {
+		return runtimeConfig{}, err
+	}
 
 	syncCfg := conduitl2.DefaultSyncConfig(statePath)
 	syncCfg.Enabled = getenvBool("SYNC_ENABLED", false)
@@ -60,11 +71,25 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 	}
 
 	return runtimeConfig{
-		Port:      port,
-		DataDir:   dataDir,
-		StorePath: storePath,
-		Sync:      syncCfg,
+		Port:               port,
+		DataDir:            dataDir,
+		StorePath:          storePath,
+		GiftWrapProtection: giftWrapProtection,
+		Sync:               syncCfg,
 	}, nil
+}
+
+func validateGiftWrapSingleMachine(mode conduitl2.GiftWrapProtectionMode, currentFlyMachine, pinnedMachine string) error {
+	if currentFlyMachine == "" {
+		return nil
+	}
+	if pinnedMachine == "" {
+		return fmt.Errorf("GIFT_WRAP_SINGLE_MACHINE_ID is required for Fly deployments in %s mode", mode)
+	}
+	if pinnedMachine != currentFlyMachine {
+		return errors.New("GIFT_WRAP_SINGLE_MACHINE_ID does not match the current Fly machine")
+	}
+	return nil
 }
 
 func getenv(key, fallback string) string {

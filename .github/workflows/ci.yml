@@ -1,0 +1,75 @@
+name: Go CI
+
+on:
+  push:
+    branches:
+      - main
+      - "agent/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Format, vet, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        shell: bash
+        run: |
+          mapfile -t go_files < <(git ls-files '*.go')
+          unformatted="$(gofmt -l "${go_files[@]}")"
+          if [[ -n "$unformatted" ]]; then
+            printf 'Unformatted Go files:\n%s\n' "$unformatted"
+            gofmt -d "${go_files[@]}"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+
+  test:
+    name: Ordinary unit and local product tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test all packages
+        run: go test -count=1 ./...
+
+  race:
+    name: Race-check all packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Race-check all packages
+        run: go test -race -count=1 ./...

@@ -39,7 +39,7 @@ func TestGiftWrapStoredResultsFilterMaliciousBackend(t *testing.T) {
 	authEvents := make(chan nostr.PubKey, 4)
 	relay.OnConnect = func(ctx context.Context) { connectionContexts <- ctx }
 	relay.OnAuth = func(_ context.Context, pubkey nostr.PubKey) { authEvents <- pubkey }
-	ConfigureRelay(relay, Scope2Options{})
+	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
 	queryCalls.Store(0)
 
 	server := httptest.NewServer(relay)
@@ -63,7 +63,7 @@ func TestGiftWrapStoredResultsFilterMaliciousBackend(t *testing.T) {
 	require.Contains(t, reason, "wildcard")
 }
 
-func TestGiftWrapStoredAndLiveRecipientIsolation(t *testing.T) {
+func TestDefaultGiftWrapProtectionEnforcesStoredAndLiveRecipientIsolation(t *testing.T) {
 	relay := khatru.NewRelay()
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
@@ -140,7 +140,7 @@ func TestGiftWrapCountsFailClosedAndPublicCountsWork(t *testing.T) {
 	}
 	authEvents := make(chan nostr.PubKey, 4)
 	relay.OnAuth = func(_ context.Context, pubkey nostr.PubKey) { authEvents <- pubkey }
-	ConfigureRelay(relay, Scope2Options{})
+	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
 
 	server := httptest.NewServer(relay)
 	defer server.Close()
@@ -184,7 +184,7 @@ func TestGiftWrapWritesRejectMalformedAndPreserveInternalDeletion(t *testing.T) 
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
-	ConfigureRelay(relay, Scope2Options{})
+	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
 
 	server := httptest.NewServer(relay)
 	defer server.Close()
@@ -243,7 +243,7 @@ func TestGiftWrapAuthorizationFollowsCurrentIdentityAndReconnectLifecycle(t *tes
 	connectionContexts := make(chan context.Context, 4)
 	relay.OnAuth = func(_ context.Context, pubkey nostr.PubKey) { authEvents <- pubkey }
 	relay.OnConnect = func(ctx context.Context) { connectionContexts <- ctx }
-	ConfigureRelay(relay, Scope2Options{})
+	ConfigureRelay(relay, Scope2Options{GiftWrapProtection: GiftWrapProtectionEnforce})
 
 	server := httptest.NewServer(relay)
 	defer server.Close()

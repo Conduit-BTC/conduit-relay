@@ -51,28 +51,43 @@ fly certs check relay.example.com -a conduitl2
 
 Apply the DNS records shown by `fly certs add` (typically `A`, `AAAA`, or `CNAME`) at your DNS provider.
 
-Create one volume per machine before scaling out, because Fly volumes are not shared between machines:
-
-```bash
-fly volumes create data --region iad --size 1 -n 2 -a conduitl2
-```
-
-If you keep the current single-volume setup, the production recipe should explicitly stay single-machine:
+Kind `1059` is stored only in the machine-local Bolt database. The relay sync
+worker copies public kinds `30402` and `5`; it does not replicate gift wraps.
+Until protected storage is shared or replicated, this app must use exactly one
+serving Machine with one attached `data` volume:
 
 ```bash
 fly scale count 1 -a conduitl2
 fly volumes list -a conduitl2
 ```
 
-If you want multiple app machines later, you need one volume per machine and each machine will build its own local cache independently.
+Do not create a second app Machine or a second independent `data` volume. A
+multi-machine deployment can accept a gift wrap on one Machine and return a
+successful but false-empty read from another.
 
-Typical deploy flow:
+The committed Fly configuration uses `NIP42_GIFTWRAP_MODE=enforce` so the
+authoritative volume never starts with unrestricted gift-wrap reads.
+Before deploying this build on Fly in any mode, set
+`GIFT_WRAP_SINGLE_MACHINE_ID` to the one intended Machine's
+`FLY_MACHINE_ID`. Startup fails when that pin is absent or does not match, so
+an ordinary cloned Machine cannot serve from another Bolt store. Keep the pin
+through in-place deploys. A deliberate Machine replacement requires controlled
+downtime: destroy the old Machine without deleting its volume, create the
+replacement in the same region with that existing volume attached, update the
+pin, and only then allow the replacement to serve.
+
+Typical single-machine deploy verification:
 
 ```bash
 fly deploy -a conduitl2 --image registry.fly.io/conduitl2:<deployment-tag>
-fly scale count 2 -a conduitl2
 fly scale show -a conduitl2
+fly volumes list -a conduitl2
 ```
+
+Horizontal scaling remains prohibited until kind-1059 storage is shared or
+replicated. Additional volumes are not a substitute for replication. The
+runtime machine pin is Fly-specific; another platform must provide an
+equivalent single-instance deployment gate before protected modes are used.
 
 You can verify secure relay connectivity with:
 
@@ -116,6 +131,8 @@ Observed local storage sample during import:
 Runtime environment variables:
 
 - `DATA_DIR`: persistent storage directory
+- `NIP42_GIFTWRAP_MODE`: protected-read rollout mode; `enforce` (default), `challenge-only`, or `disabled`; unknown values fail startup
+- `GIFT_WRAP_SINGLE_MACHINE_ID`: required on Fly in every mode; must equal the current `FLY_MACHINE_ID`
 - `SYNC_ENABLED`: enable preload/live caching
 - `SYNC_RELAYS`: comma-separated source relay URLs
 - `SYNC_BACKFILL_SINCE`: RFC3339 timestamp for the initial historical import start; if unset, defaults to about 1 year ago
@@ -229,24 +246,64 @@ nak req -k 30402 -l 10 --search 'conduit-l2:q=apple;sort=newest' ws://127.0.0.1:
 nak req -k 30402 -l 10 --search 'conduit-l2:q=;sort=price_asc;partial=1' ws://127.0.0.1:3334
 ```
 
-7) Show fail-closed behavior for an unscoped `kind:1059` read:
+## Protected gift-wrap read rollout
 
-```bash
-nak req -k 1059 ws://127.0.0.1:3334
-```
+`NIP42_GIFTWRAP_MODE` controls reads only. Every mode keeps canonical
+single-recipient validation for kind-1059 writes and does not require the
+recipient or merchant identity to publish a valid gift wrap.
 
-This request is intentionally invalid: gift-wrap reads require NIP-42 authentication and an exact recipient filter. A valid client flow is:
+- `disabled`: preserves legacy read availability and does not offer AUTH for
+  gift-wrap reads. Use this only in an empty, non-sensitive canary environment.
+- `challenge-only`: offers the connection-bound NIP-42 challenge for explicit
+  kind-1059 reads and counts, but does not deny or filter them. This is a
+  temporary, non-private mode for an empty canary environment.
+- `enforce`: requires one exact kind-1059 filter, one canonical recipient, and
+  the current authenticated identity. Stored and live delivery are both
+  rechecked. Wildcard reads, protected counts, and protected negentropy are
+  rejected before backend access. This is the runtime and Fly default.
 
-1. Handle the relay's `AUTH` challenge.
-2. Sign and send a kind `22242` authentication event containing the exact relay URL and challenge.
-3. Wait for the successful `OK`, then retry the read as `{"kinds":[1059],"#p":["<authenticated 32-byte lowercase hex pubkey>"]}`.
-4. Authorization follows the most recently successful identity on that WebSocket. Existing protected subscriptions are re-checked on every delivery after an identity change.
+Only `enforce` advertises the nonstandard NIP-11 tag
+`protected_kind:1059`. Every mode advertises its current state as
+`giftwrap_read_policy:<mode>`. NIP-42 support by itself is not evidence that
+recipient enforcement is active.
 
-Unfiltered, wildcard, mixed-kind, malformed, multi-recipient, and mismatched-recipient gift-wrap reads are rejected or suppressed. Kindless subscriptions are rejected because backend result limits could otherwise expose protected activity even after event filtering. Protected counts and protected negentropy are deliberately unsupported. Public subscriptions remain available when they explicitly request public kinds.
+The AUTH event must have kind `22242`, a fresh timestamp, the current
+connection challenge, the externally visible relay URL, a valid signature and
+canonical transmitted event ID. NIP-42 does not constrain its content. For a
+custom domain or TLS proxy, do not deploy this build against the authoritative
+volume until the URL derived by the relay matches the URL signed by clients.
+Use an empty canary for `disabled` or `challenge-only` compatibility testing.
 
-The product's relay-read loop must implement the challenge/sign/send/wait/retry sequence above before this relay policy is rolled out. Deploy the product support first, then the relay, then verify stored and live A/B isolation in production. Do not describe a deployment as recipient-restricted until that verification passes.
+Controlled rollout order:
 
-Deleted product revisions are filtered out of accelerated browse results. This package currently advertises browse/search/sort behavior plus recipient-authorized `kind:1059` reads; it does not advertise separate product-detail or profile-lookup acceleration.
+1. Land and establish adoption of the challenge-capable client.
+2. Exercise `disabled` and `challenge-only` only on an empty, non-sensitive
+   canary. Confirm supported clients authenticate without repeated signer
+   prompts and protected views keep typed policy outcomes.
+3. Confirm the existing authoritative volume holds the intended history and
+   the production environment explicitly selects `enforce`.
+4. Deploy this relay version on the one pinned production Machine and verify
+   exact-recipient stored and live reads before restoring normal traffic.
+5. Verify the one-Machine, one-attached-volume topology again after each deploy
+   change. Do not expand until kind-1059 storage is shared or replicated.
+
+Do not roll the authoritative volume back to `challenge-only` or `disabled`:
+both restore unrestricted gift-wrap reads. If enforcement must be rolled back,
+stop serving traffic and restore the previous recipient-enforcing build. Mode
+changes restart the process, close existing sockets, and cause new
+connection-bound challenges.
+
+A policy rollback does not repair split local storage. If an extra Machine or
+volume ever served traffic, stop protected rollout, remove the extra serving
+topology, identify the existing volume with the intended history, and restore
+one pinned Machine before resuming. The pin guards normal deployment mistakes;
+it is not a platform-wide count lock against an operator deliberately assigning
+a different matching pin to another Machine.
+
+Deleted product revisions are filtered out of accelerated browse results. This
+package advertises browse/search/sort behavior in every mode and claims
+recipient-authorized kind-1059 reads only in `enforce`; it does not advertise
+separate product-detail or profile-lookup acceleration.
 
 ## One-command demo and validation
 
@@ -256,4 +313,6 @@ From this project root:
 ./run_demo.sh
 ```
 
-The script starts the demo relay, publishes test products, validates sorting and text filtering, and checks that an unauthenticated/unscoped `kind:1059` request fails closed.
+The script starts the demo relay, publishes test products, and validates
+ordinary sorting and text filtering. Protected-read acceptance is reserved for
+the controlled deployment checklist and is not probed by this script.

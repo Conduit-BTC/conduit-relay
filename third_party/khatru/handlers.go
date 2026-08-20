@@ -68,6 +68,13 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	corsMiddleware.Handler(rl.serveMux).ServeHTTP(w, r)
 }
 
+func validateAuthEvent(event nostr.Event, challenge, relayURL string) (nostr.PubKey, error) {
+	if !event.CheckID() {
+		return nostr.ZeroPK, errors.New("event id is computed incorrectly")
+	}
+	return nip42.ValidateAuthEvent(event, challenge, relayURL)
+}
+
 func (rl *Relay) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if nil != rl.RejectConnection {
 		if rl.RejectConnection(r) {
@@ -353,7 +360,7 @@ func (rl *Relay) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 					rl.removeListenerId(ws, id)
 				case *nostr.AuthEnvelope:
 					wsBaseUrl := strings.Replace(rl.getBaseURL(r), "http", "ws", 1)
-					if pubkey, err := nip42.ValidateAuthEvent(env.Event, ws.Challenge, wsBaseUrl); err == nil {
+					if pubkey, err := validateAuthEvent(env.Event, ws.Challenge, wsBaseUrl); err == nil {
 						ws.authLock.Lock()
 						total := len(ws.AuthedPublicKeys)
 						if idx := slices.Index(ws.AuthedPublicKeys, pubkey); idx == -1 {
