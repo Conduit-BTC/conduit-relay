@@ -56,6 +56,8 @@ jobs:
 
           metadata="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"             --jq '[.base.ref // "", .head.sha // "", ((.head.repo.full_name != .base.repo.full_name) | tostring), ((.draft == true) | tostring), .state // "", .author_association // "", .user.login // ""] | join("\u001f")')"
           IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state author_association author_login <<< "$metadata"
+          state="${state^^}"
+          author_association="${author_association^^}"
 
           if [[ "$is_cross_repo" == "true" ]]; then
             echo "Agent review is disabled for cross-repository pull requests." >&2
