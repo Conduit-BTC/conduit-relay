@@ -53,3 +53,26 @@ jobs:
             maintenance. Reply with one sentence indicating whether
             authentication succeeded.
 
+      - name: Fail when refreshed authentication cannot be verified as persisted
+        shell: bash
+        env:
+          INITIAL_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+
+          auth_path="$HOME/.codex/auth.json"
+          if [[ ! -s "$auth_path" ]]; then
+            echo "The refreshed Codex auth file is missing." >&2
+            exit 1
+          fi
+
+          initial_digest="$(printf '%s' "$INITIAL_AUTH_JSON" | sha256sum | cut -d' ' -f1)"
+          current_digest="$(sha256sum "$auth_path" | cut -d' ' -f1)"
+
+          if [[ "$initial_digest" != "$current_digest" ]]; then
+            echo "CODEX_AUTH_JSON changed, but Sudden Agent v1.14.1 does not expose a persistence result." >&2
+            echo "Failing closed so a maintainer can bootstrap the organization secret again instead of accepting a stale credential." >&2
+            exit 1
+          fi
+
+          echo "Codex authentication succeeded without rotating the injected credential."

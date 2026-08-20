@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   harden:
+    if: contains(fromJSON('["dylangolow","conduitdevelopers","kevin-kinkade"]'), github.actor)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -49,13 +50,21 @@ jobs:
             echo "Pull request number must be a positive integer." >&2
             exit 1
           fi
-          if [[ "$RISK_CLASS" == "C" ]]; then
+          metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"             --json baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,labels,state             --jq '[.baseRefName // "", .headRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // "", ([.labels[].name] | join(","))] | join("\u001f")')"
+          IFS=$'\x1f' read -r base_ref head_ref head_sha is_cross_repo is_draft state labels <<< "$metadata"
+
+          labels="${labels,,}"
+          effective_risk="$RISK_CLASS"
+          if [[ ",$labels," == *",risk:C,"* ]]; then
+            effective_risk="C"
+          elif [[ ",$labels," == *",risk:B,"* && "$effective_risk" == "A" ]]; then
+            effective_risk="B"
+          fi
+
+          if [[ "$effective_risk" == "C" ]]; then
             echo "Risk class C requires human-owned planning before agent code changes." >&2
             exit 1
           fi
-
-          metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"             --json baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,labels,state             --jq '[.baseRefName // "", .headRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // "", ([.labels[].name] | join(","))] | join("\u001f")')"
-          IFS=$'\x1f' read -r base_ref head_ref head_sha is_cross_repo is_draft state labels <<< "$metadata"
 
           if [[ "$is_cross_repo" == "true" ]]; then
             echo "Agent hardening is disabled for cross-repository pull requests." >&2
@@ -77,6 +86,7 @@ jobs:
           echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "risk_class=$effective_risk" >> "$GITHUB_OUTPUT"
 
       - name: Require automation credentials
         shell: bash
@@ -132,7 +142,7 @@ jobs:
             Task:
             ${{ inputs.task }}
 
-            Risk class: ${{ inputs.risk_class }}
+            Risk class: ${{ steps.pr.outputs.risk_class }}
 
             You may edit files and push focused commits to the pull request
             branch. Do not merge, deploy, alter secrets, change labels, or
@@ -154,4 +164,3 @@ jobs:
             Never add secrets, private runbooks, Nostr secret keys, wallet
             credentials, event payload logs, or unbounded user text to tracked
             files.
-
