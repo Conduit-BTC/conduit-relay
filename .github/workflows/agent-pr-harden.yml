@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   harden:
-    if: contains(fromJSON('["JamesTsetsekas","dylangolow","ericfj2140","m0wer","d3vv3","conduitdevelopers","kevin-kinkade"]'), github.actor)
+    if: github.actor == 'm0wer'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
