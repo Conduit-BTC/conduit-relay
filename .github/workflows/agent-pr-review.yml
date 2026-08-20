@@ -54,10 +54,9 @@ jobs:
             exit 1
           fi
 
-          metadata="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"             --jq '[.base.ref // "", .head.sha // "", ((.head.repo.full_name != .base.repo.full_name) | tostring), ((.draft == true) | tostring), .state // "", .author_association // "", .user.login // ""] | join("\u001f")')"
-          IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state author_association author_login <<< "$metadata"
+          metadata="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"             --jq '[.base.ref // "", .head.sha // "", ((.head.repo.full_name != .base.repo.full_name) | tostring), ((.draft == true) | tostring), .state // "", .user.login // ""] | join("\u001f")')"
+          IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state author_login <<< "$metadata"
           state="${state^^}"
-          author_association="${author_association^^}"
 
           if [[ "$is_cross_repo" == "true" ]]; then
             echo "Agent review is disabled for cross-repository pull requests." >&2
@@ -73,10 +72,6 @@ jobs:
           fi
           if [[ "$state" != "OPEN" || -z "$head_sha" ]]; then
             echo "Agent review requires an open pull request with a resolvable head SHA." >&2
-            exit 1
-          fi
-          if [[ "$author_association" != "OWNER" && "$author_association" != "MEMBER" && "$author_association" != "COLLABORATOR" ]]; then
-            echo "Automatic agent review requires a trusted same-repository pull request author." >&2
             exit 1
           fi
           if [[ "$author_login" == "dependabot[bot]" ]]; then
