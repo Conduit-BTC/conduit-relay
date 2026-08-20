@@ -4,7 +4,7 @@ app = "conduitl2"
   PORT = "3334"
   DATA_DIR = "/data"
   SYNC_ENABLED = "true"
-  NIP42_GIFTWRAP_MODE = "disabled"
+  NIP42_GIFTWRAP_MODE = "enforce"
 
 # Set GIFT_WRAP_SINGLE_MACHINE_ID in the Fly deployment environment before
 # deploying this build in any mode. Do not commit a deployment-specific

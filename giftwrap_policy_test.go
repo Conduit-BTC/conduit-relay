@@ -15,7 +15,7 @@ func TestParseGiftWrapProtectionMode(t *testing.T) {
 		raw  string
 		want GiftWrapProtectionMode
 	}{
-		{raw: "", want: GiftWrapProtectionDisabled},
+		{raw: "", want: GiftWrapProtectionEnforce},
 		{raw: "disabled", want: GiftWrapProtectionDisabled},
 		{raw: "challenge-only", want: GiftWrapProtectionChallengeOnly},
 		{raw: "enforce", want: GiftWrapProtectionEnforce},

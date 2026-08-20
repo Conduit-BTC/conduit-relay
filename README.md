@@ -65,7 +65,8 @@ Do not create a second app Machine or a second independent `data` volume. A
 multi-machine deployment can accept a gift wrap on one Machine and return a
 successful but false-empty read from another.
 
-The committed Fly configuration starts with `NIP42_GIFTWRAP_MODE=disabled`.
+The committed Fly configuration uses `NIP42_GIFTWRAP_MODE=enforce` so the
+authoritative volume never starts with unrestricted gift-wrap reads.
 Before deploying this build on Fly in any mode, set
 `GIFT_WRAP_SINGLE_MACHINE_ID` to the one intended Machine's
 `FLY_MACHINE_ID`. Startup fails when that pin is absent or does not match, so
@@ -130,7 +131,7 @@ Observed local storage sample during import:
 Runtime environment variables:
 
 - `DATA_DIR`: persistent storage directory
-- `NIP42_GIFTWRAP_MODE`: protected-read rollout mode; `disabled` (default), `challenge-only`, or `enforce`; unknown values fail startup
+- `NIP42_GIFTWRAP_MODE`: protected-read rollout mode; `enforce` (default), `challenge-only`, or `disabled`; unknown values fail startup
 - `GIFT_WRAP_SINGLE_MACHINE_ID`: required on Fly in every mode; must equal the current `FLY_MACHINE_ID`
 - `SYNC_ENABLED`: enable preload/live caching
 - `SYNC_RELAYS`: comma-separated source relay URLs
@@ -252,14 +253,14 @@ single-recipient validation for kind-1059 writes and does not require the
 recipient or merchant identity to publish a valid gift wrap.
 
 - `disabled`: preserves legacy read availability and does not offer AUTH for
-  gift-wrap reads. This is the deployment and emergency rollback default.
+  gift-wrap reads. Use this only in an empty, non-sensitive canary environment.
 - `challenge-only`: offers the connection-bound NIP-42 challenge for explicit
   kind-1059 reads and counts, but does not deny or filter them. This is a
-  temporary, non-private canary mode.
+  temporary, non-private mode for an empty canary environment.
 - `enforce`: requires one exact kind-1059 filter, one canonical recipient, and
   the current authenticated identity. Stored and live delivery are both
   rechecked. Wildcard reads, protected counts, and protected negentropy are
-  rejected before backend access.
+  rejected before backend access. This is the runtime and Fly default.
 
 Only `enforce` advertises the nonstandard NIP-11 tag
 `protected_kind:1059`. Every mode advertises its current state as
@@ -269,30 +270,27 @@ recipient enforcement is active.
 The AUTH event must have kind `22242`, a fresh timestamp, the current
 connection challenge, the externally visible relay URL, a valid signature and
 canonical transmitted event ID. NIP-42 does not constrain its content. For a
-custom domain or TLS proxy, keep the relay in `disabled` until the URL derived
-by the relay matches the URL signed by clients.
+custom domain or TLS proxy, do not deploy this build against the authoritative
+volume until the URL derived by the relay matches the URL signed by clients.
+Use an empty canary for `disabled` or `challenge-only` compatibility testing.
 
 Controlled rollout order:
 
 1. Land and establish adoption of the challenge-capable client.
-2. Confirm the existing volume holds the intended history, then deploy this
-   relay version in `disabled` mode on one pinned Machine and that volume.
-   Public reads and valid encrypted writes remain unchanged.
-3. Select `challenge-only`. Supported clients authenticate, while read
-   availability remains unchanged and unsupported clients are not denied. In
-   controlled client QA, AUTH completes once per connection without repeated
-   signer prompts, and protected views do not present transport failures.
-4. Select `enforce` on that same Machine only after controlled human QA.
-   Exact-recipient reads complete; policy failures remain typed and do not
-   appear as transport failures.
-5. Verify the one-Machine, one-attached-volume topology again after each mode
+2. Exercise `disabled` and `challenge-only` only on an empty, non-sensitive
+   canary. Confirm supported clients authenticate without repeated signer
+   prompts and protected views keep typed policy outcomes.
+3. Confirm the existing authoritative volume holds the intended history and
+   the production environment explicitly selects `enforce`.
+4. Deploy this relay version on the one pinned production Machine and verify
+   exact-recipient stored and live reads before restoring normal traffic.
+5. Verify the one-Machine, one-attached-volume topology again after each deploy
    change. Do not expand until kind-1059 storage is shared or replicated.
 
-Normal rollback is `enforce` to `challenge-only`, which stops denials while
-retaining AUTH visibility. `disabled` is the emergency legacy state. Both
-rollback modes restore legacy unrestricted gift-wrap read availability and are
-privacy-degrading compatibility states, not recipient-protected states. A mode
-change restarts the process, closes existing sockets, and causes new
+Do not roll the authoritative volume back to `challenge-only` or `disabled`:
+both restore unrestricted gift-wrap reads. If enforcement must be rolled back,
+stop serving traffic and restore the previous recipient-enforcing build. Mode
+changes restart the process, close existing sockets, and cause new
 connection-bound challenges.
 
 A policy rollback does not repair split local storage. If an extra Machine or

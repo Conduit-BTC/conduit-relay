@@ -16,7 +16,7 @@ func TestLoadRuntimeConfigParsesGiftWrapProtectionMode(t *testing.T) {
 		raw  string
 		want conduitl2.GiftWrapProtectionMode
 	}{
-		{name: "default", raw: "", want: conduitl2.GiftWrapProtectionDisabled},
+		{name: "default", raw: "", want: conduitl2.GiftWrapProtectionEnforce},
 		{name: "disabled", raw: "disabled", want: conduitl2.GiftWrapProtectionDisabled},
 		{name: "challenge-only", raw: "challenge-only", want: conduitl2.GiftWrapProtectionChallengeOnly},
 		{name: "enforce", raw: "enforce", want: conduitl2.GiftWrapProtectionEnforce},

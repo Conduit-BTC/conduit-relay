@@ -30,21 +30,23 @@ const (
 type GiftWrapProtectionMode uint8
 
 const (
-	GiftWrapProtectionDisabled GiftWrapProtectionMode = iota
+	GiftWrapProtectionEnforce GiftWrapProtectionMode = iota
+	GiftWrapProtectionDisabled
 	GiftWrapProtectionChallengeOnly
-	GiftWrapProtectionEnforce
 )
 
 func ParseGiftWrapProtectionMode(raw string) (GiftWrapProtectionMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "disabled":
+	case "":
+		return GiftWrapProtectionEnforce, nil
+	case "disabled":
 		return GiftWrapProtectionDisabled, nil
 	case "challenge-only":
 		return GiftWrapProtectionChallengeOnly, nil
 	case "enforce":
 		return GiftWrapProtectionEnforce, nil
 	default:
-		return GiftWrapProtectionDisabled, fmt.Errorf("unknown NIP-42 gift-wrap mode %q", raw)
+		return GiftWrapProtectionEnforce, fmt.Errorf("unknown NIP-42 gift-wrap mode %q", raw)
 	}
 }
 
@@ -609,7 +611,7 @@ func withDefaults(opts *Scope2Options) {
 	switch opts.GiftWrapProtection {
 	case GiftWrapProtectionDisabled, GiftWrapProtectionChallengeOnly, GiftWrapProtectionEnforce:
 	default:
-		// The zero value is the intentional availability-safe rollout default.
+		// The zero value is the recipient-protecting default.
 		// Any other unknown programmatic value fails closed instead of silently
 		// disabling recipient enforcement.
 		opts.GiftWrapProtection = GiftWrapProtectionEnforce
