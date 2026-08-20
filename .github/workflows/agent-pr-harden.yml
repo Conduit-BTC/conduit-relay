@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   harden:
-    if: contains(fromJSON('["dylangolow","conduitdevelopers","kevin-kinkade"]'), github.actor)
+    if: contains(fromJSON('["JamesTsetsekas","dylangolow","ericfj2140","m0wer","d3vv3","conduitdevelopers","kevin-kinkade"]'), github.actor)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -53,13 +53,35 @@ jobs:
           metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"             --json baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,labels,state             --jq '[.baseRefName // "", .headRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // "", ([.labels[].name] | join(","))] | join("\u001f")')"
           IFS=$'\x1f' read -r base_ref head_ref head_sha is_cross_repo is_draft state labels <<< "$metadata"
 
+          resolve_effective_risk() {
+            local input_risk="$1"
+            local label_csv="$2"
+
+            if [[ ",$label_csv," == *",risk:c,"* ]]; then
+              printf 'C'
+            elif [[ ",$label_csv," == *",risk:b,"* && "$input_risk" == "A" ]]; then
+              printf 'B'
+            else
+              printf '%s' "$input_risk"
+            fi
+          }
+
+          while IFS='|' read -r test_input test_labels expected; do
+            actual="$(resolve_effective_risk "$test_input" "$test_labels")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Risk resolver self-test failed: input=$test_input labels=$test_labels expected=$expected actual=$actual" >&2
+              exit 1
+            fi
+          done <<'RISK_CASES'
+          A|risk:a|A
+          A|risk:b|B
+          A|risk:c|C
+          B|risk:a|B
+          B|risk:c|C
+          RISK_CASES
+
           labels="${labels,,}"
-          effective_risk="$RISK_CLASS"
-          if [[ ",$labels," == *",risk:C,"* ]]; then
-            effective_risk="C"
-          elif [[ ",$labels," == *",risk:B,"* && "$effective_risk" == "A" ]]; then
-            effective_risk="B"
-          fi
+          effective_risk="$(resolve_effective_risk "$RISK_CLASS" "$labels")"
 
           if [[ "$effective_risk" == "C" ]]; then
             echo "Risk class C requires human-owned planning before agent code changes." >&2

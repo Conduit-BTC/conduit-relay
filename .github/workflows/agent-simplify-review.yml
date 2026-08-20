@@ -20,11 +20,12 @@ permissions:
 jobs:
   preflight:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+        contains(fromJSON('["JamesTsetsekas","dylangolow","ericfj2140","m0wer","d3vv3","conduitdevelopers","kevin-kinkade"]'), github.actor)) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.comment.body == '/agent simplify' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        contains(fromJSON('["JamesTsetsekas","dylangolow","ericfj2140","m0wer","d3vv3","conduitdevelopers","kevin-kinkade"]'), github.actor)) ||
       (github.event_name == 'pull_request_review' &&
         github.event.review.user.login == 'conduit-sudden-agent[bot]' &&
         contains(github.event.review.body, '<!-- conduit:sudden-review clean head='))
