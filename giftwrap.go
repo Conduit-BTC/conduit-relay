@@ -38,7 +38,7 @@ func configureGiftWrapProtection(relay *khatru.Relay, mode GiftWrapProtectionMod
 
 	switch mode {
 	case GiftWrapProtectionChallengeOnly:
-		configureGiftWrapChallenges(relay)
+		configureGiftWrapChallengeHooks(relay, offerGiftWrapAuth)
 	case GiftWrapProtectionEnforce:
 		configureGiftWrapEnforcement(relay)
 	}
@@ -58,10 +58,6 @@ func configureGiftWrapWriteValidation(relay *khatru.Relay) {
 		}
 		return false, ""
 	}
-}
-
-func configureGiftWrapChallenges(relay *khatru.Relay) {
-	configureGiftWrapChallengeHooks(relay, offerGiftWrapAuth)
 }
 
 func configureGiftWrapChallengeHooks(relay *khatru.Relay, offerAuth func(context.Context)) {

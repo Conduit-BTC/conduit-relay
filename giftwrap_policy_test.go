@@ -2,6 +2,7 @@ package conduitl2
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,7 +27,6 @@ func TestParseGiftWrapProtectionMode(t *testing.T) {
 		got, err := ParseGiftWrapProtectionMode(test.raw)
 		require.NoError(t, err)
 		require.Equal(t, test.want, got)
-		require.Equal(t, test.want.String(), got.String())
 	}
 
 	_, err := ParseGiftWrapProtectionMode("unknown")
@@ -162,15 +162,6 @@ func TestGiftWrapProtectionNIP11TagRequiresEnforcement(t *testing.T) {
 		info := relay.OverwriteRelayInformation(context.Background(), nil, *relay.Info)
 
 		require.Contains(t, info.Tags, "giftwrap_read_policy:"+test.mode.String())
-		require.Equal(t, test.wantProtection, containsString(info.Tags, "protected_kind:1059"))
+		require.Equal(t, test.wantProtection, slices.Contains(info.Tags, "protected_kind:1059"))
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
