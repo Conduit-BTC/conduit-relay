@@ -1,8 +1,9 @@
 name: Agent PR Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, edited, synchronize, ready_for_review]
+    branches: [main]
   pull_request_review_comment:
     types: [created, edited]
   issue_comment:
@@ -10,121 +11,164 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Pull request number to review"
+        description: Pull request number to review
         required: true
         type: string
 
 permissions:
-  contents: read
-  pull-requests: write
-  issues: write
   actions: read
+  contents: read
+  pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.ref }}
-  cancel-in-progress: false
+  group: agent-pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}
 
 jobs:
   review:
     if: >-
-      contains(fromJSON('["dylangolow","conduitdevelopers","kevin-kinkade"]'), github.actor) &&
-      (
-        github.event_name == 'pull_request' ||
-        (github.event_name == 'issue_comment' &&
-          github.event.issue.pull_request &&
-          contains(github.event.comment.body, '/agent review')) ||
-        (github.event_name == 'pull_request_review_comment' &&
-          contains(github.event.comment.body, '/agent review')) ||
-        github.event_name == 'workflow_dispatch'
-      )
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor == 'm0wer') ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) &&
+        github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/agent review' &&
+        github.actor == 'm0wer') ||
+      (github.event_name == 'pull_request_review_comment' &&
+        github.event.comment.body == '/agent review' &&
+        github.actor == 'm0wer')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check agent auth
-        id: agent_auth
+      - name: Validate pull request
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Pull request number must be a positive integer." >&2
+            exit 1
+          fi
+
+          metadata="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"             --json baseRefName,headRefOid,isCrossRepository,isDraft,state             --jq '[.baseRefName // "", .headRefOid // "", ((.isCrossRepository == true) | tostring), ((.isDraft == true) | tostring), .state // ""] | join("\u001f")')"
+          IFS=$'\x1f' read -r base_ref head_sha is_cross_repo is_draft state <<< "$metadata"
+
+          if [[ "$is_cross_repo" == "true" ]]; then
+            echo "Agent review is disabled for cross-repository pull requests." >&2
+            exit 1
+          fi
+          if [[ "$base_ref" != "main" ]]; then
+            echo "Agent review requires a pull request targeting main." >&2
+            exit 1
+          fi
+          if [[ "$is_draft" == "true" ]]; then
+            echo "Agent review requires a ready pull request." >&2
+            exit 1
+          fi
+          if [[ "$state" != "OPEN" || -z "$head_sha" ]]; then
+            echo "Agent review requires an open pull request with a resolvable head SHA." >&2
+            exit 1
+          fi
+
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Require automation credentials
         shell: bash
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GITHUB_APP_CLIENT_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_codex_auth_json=true" >> "$GITHUB_OUTPUT" || echo "has_codex_auth_json=false" >> "$GITHUB_OUTPUT"
-          [[ -n "$CODEX_AUTH_JSON" ]] && echo "has_auth=true" >> "$GITHUB_OUTPUT" || echo "has_auth=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$CODEX_AUTH_JSON" ]] || { echo "CODEX_AUTH_JSON is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_CLIENT_ID" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_PRIVATE_KEY" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY is required." >&2; exit 1; }
 
-      - name: Skip when agent auth is unavailable
-        if: steps.agent_auth.outputs.has_auth != 'true'
-        run: echo "CODEX_AUTH_JSON is not configured; skipping agent review."
-
-      - uses: actions/checkout@v7
-        if: steps.agent_auth.outputs.has_auth == 'true'
+      - name: Checkout immutable pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ steps.pr.outputs.head_sha }}
 
-      - name: Check out workflow-dispatch pull request
-        if: steps.agent_auth.outputs.has_auth == 'true' && github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr checkout "${{ inputs.pr_number }}"
-
-      - name: Check workflow agent GitHub App auth
-        id: app_auth
-        if: steps.agent_auth.outputs.has_auth == 'true'
-        shell: bash
-        env:
-          WORKFLOW_AGENT_GITHUB_APP_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
-          WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          [[ -n "$WORKFLOW_AGENT_GITHUB_APP_ID" && -n "$WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY" ]] && echo "has_app=true" >> "$GITHUB_OUTPUT" || echo "has_app=false" >> "$GITHUB_OUTPUT"
-
-      - name: Create workflow agent GitHub App token
+      - name: Create GitHub App review token
         id: app_token
-        if: steps.app_auth.outputs.has_app == 'true'
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_ID }}
+          client-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
           permission-actions: read
           permission-contents: read
-          permission-issues: write
           permission-pull-requests: write
 
-      - name: Require workflow agent GitHub App token
-        if: steps.agent_auth.outputs.has_auth == 'true' && steps.app_token.outputs.token == ''
-        run: |
-          echo "Agent PR Review requires the workflow agent GitHub App token."
-          exit 1
-
-      - name: Run Sudden Agent review with CODEX_AUTH_JSON
-        id: review_codex_auth_json
-        if: steps.agent_auth.outputs.has_codex_auth_json == 'true'
-        uses: sudden-network/agent@v1.14.1
+      - name: Run fresh Sudden Agent review
+        uses: sudden-network/agent@2afabe84ac9bf58e57f605b41b2c4f87bbe9c579 # v1.14.1
         with:
           agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
           github_token: ${{ steps.app_token.outputs.token }}
           github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
-          model: gpt-5.4/xhigh
-          resume: true
+          model: ${{ vars.WORKFLOW_AGENT_CODEX_MODEL || 'gpt-5.6-sol/xhigh' }}
+          resume: false
           prompt: |
-            You are reviewing a Conduit relay pull request.
-            Pull request: #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+            Perform a fresh, read-only correctness review of
+            Conduit-BTC/conduit-relay PR #${{ steps.pr.outputs.number }} at head
+            ${{ steps.pr.outputs.head_sha }}. Review the complete base-to-head
+            diff. Do not edit files, push commits, create branches, change
+            labels, merge, deploy, request reviewers, or update external systems.
 
-            Stay read-only. Do not edit files, push commits, create branches,
-            change labels, deploy, alter secrets, or update external services.
+            Read repository guidance, contributor documentation, the changed
+            files, and their callers before judging the diff.
 
             Review priorities:
-            1. Nostr relay protocol correctness, filtering, sync behavior, and regressions.
-            2. Privacy, auth, event handling, and denial-of-service risks.
-            3. Go concurrency, lifecycle, and error handling.
-            4. Test coverage and deterministic fixtures.
+            1. Nostr relay protocol correctness, filtering, and compatibility.
+            2. Authentication, privacy, event handling, and denial-of-service risks.
+            3. Go concurrency, lifecycle, storage, and error handling.
+            4. Test coverage, deterministic fixtures, and deployment safety.
             5. Maintainability.
 
             Mandatory constraints:
-            - No key custody or wallet/signer secret handling.
-            - Do not expose event payloads beyond what is already public in the repo.
-            - Do not approve if required CI is pending or failed.
+            - Preserve NIP-17, NIP-42, NIP-59, and NIP-77 interoperability.
+            - Do not expose event payloads, message content, credentials, signer
+              material, wallet data, or private operational context.
+            - Treat kind-1059 recipient isolation as a privacy boundary.
+            - Do not approve while required CI is pending or failed.
+            - Automatic Ponytail review is intentionally once per pull request.
+              Maintainers use `/agent simplify` for an explicit rerun.
 
-            Output findings first with P0/P1/P2 severity and concrete file/line
-            references. For small safe fixes on changed lines, include a
-            GitHub ```suggestion block. If there are no blocking findings, say
-            so explicitly and list residual test or runtime risks.
+            Review delivery contract:
+            - Submit review feedback through GitHub pull request reviews, not PR
+              Conversation or issue comments.
+            - Use `github.octokit_request` with
+              `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` for the
+              final review. Include `event: "COMMENT"`,
+              `commit_id: "${{ steps.pr.outputs.head_sha }}"`, and a concise
+              `body`.
+            - Every actionable P0, P1, or P2 finding must be an inline review
+              comment on a changed file and line. Use `comments[].body`,
+              `comments[].path`, `comments[].line`, and `comments[].side`.
+              Use `"RIGHT"` for additions or context and `"LEFT"` for deletions.
+            - Anchor multi-file findings on the primary changed line and name
+              related files in that inline comment.
+            - Keep the review body to a concise summary and residual test or
+              release risks. Do not duplicate actionable finding detail there.
+            - If an inline review cannot be submitted, leave no top-level finding
+              and state the delivery blocker in the review body.
+
+            Clean-review handoff contract:
+            - If and only if there are zero actionable P0, P1, or P2 findings,
+              include this exact marker in the review body:
+              `<!-- conduit:sudden-review clean head=${{ steps.pr.outputs.head_sha }} -->`
+            - A clean review must have zero inline comments. State
+              `No actionable findings.` and list only residual verification
+              risks after the marker.
+            - Never include the clean marker when any actionable finding exists
+              or review delivery is blocked.

@@ -1,0 +1,78 @@
+name: Agent Auth Health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-auth-health
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require refresh credentials
+        shell: bash
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GITHUB_APP_CLIENT_ID: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CODEX_AUTH_JSON" ]] || { echo "CODEX_AUTH_JSON is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_CLIENT_ID" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID is required." >&2; exit 1; }
+          [[ -n "$GITHUB_APP_PRIVATE_KEY" ]] || { echo "WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY is required." >&2; exit 1; }
+
+      - name: Create GitHub App auth-health token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WORKFLOW_AGENT_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WORKFLOW_AGENT_GITHUB_APP_PRIVATE_KEY }}
+          permission-contents: read
+
+      - name: Validate dedicated Codex authentication
+        uses: sudden-network/agent@2afabe84ac9bf58e57f605b41b2c4f87bbe9c579 # v1.14.1
+        with:
+          agent_auth_file: ${{ secrets.CODEX_AUTH_JSON }}
+          github_token: ${{ steps.app_token.outputs.token }}
+          github_token_actor: ${{ format('{0}[bot]', steps.app_token.outputs['app-slug']) }}
+          model: ${{ vars.WORKFLOW_AGENT_CODEX_MODEL || 'gpt-5.6-sol/xhigh' }}
+          resume: false
+          prompt: |
+            Validate the injected dedicated Codex authentication. Do not
+            inspect repository code, edit files, create comments, open pull
+            requests, change labels, alter secrets, or perform repository
+            maintenance. Reply with one sentence indicating whether
+            authentication succeeded. Secret rotation is handled by the
+            organization bootstrap process, not by this workflow.
+
+      - name: Require organization bootstrap after credential rotation
+        shell: bash
+        env:
+          INITIAL_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+
+          auth_path="$HOME/.codex/auth.json"
+          if [[ ! -s "$auth_path" ]]; then
+            echo "The refreshed Codex auth file is missing." >&2
+            exit 1
+          fi
+
+          initial_digest="$(printf '%s' "$INITIAL_AUTH_JSON" | sha256sum | cut -d' ' -f1)"
+          current_digest="$(sha256sum "$auth_path" | cut -d' ' -f1)"
+
+          if [[ "$initial_digest" != "$current_digest" ]]; then
+            echo "Codex rotated the runner credential." >&2
+            echo "Run the approved bootstrap flow to replace the Conduit-BTC organization CODEX_AUTH_JSON secret." >&2
+            exit 1
+          fi
+
+          echo "Codex authentication succeeded without rotating the injected credential."
