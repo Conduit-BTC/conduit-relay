@@ -1,3 +1,7 @@
+# Relay implementations
+
+Production Congee source, browser origins, and release steps are documented in [Congee source and releases](docs/CONGEE_SOURCE.md). Build it with `congee/Dockerfile`. The root module and Dockerfile below build the legacy relay.
+
 # Conduit L2 Scope 2 for Khatru
 
 This directory contains the Scope 2 relay-layer extension for `khatru`.

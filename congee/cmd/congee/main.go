@@ -1,0 +1,248 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/joho/godotenv"
+	"github.com/michmich112/congee/internal/admin"
+	"github.com/michmich112/congee/internal/audit"
+	"github.com/michmich112/congee/internal/config"
+	"github.com/michmich112/congee/internal/db"
+	"github.com/michmich112/congee/internal/nip77/upstream"
+	"github.com/michmich112/congee/internal/nips"
+	"github.com/michmich112/congee/internal/plugin"
+	"github.com/michmich112/congee/internal/relay"
+	"github.com/michmich112/congee/internal/relayidentity"
+	"github.com/michmich112/congee/internal/version"
+	"github.com/rs/zerolog"
+)
+
+func main() {
+	if tryPrintVersion(os.Args) {
+		return
+	}
+
+	tryLoadDotenv()
+
+	path := os.Getenv("CONFIG_PATH")
+	if path == "" {
+		path = "/data/config/config.json"
+	}
+	if err := config.EnsureConfigFile(path); err != nil {
+		panic("config: " + err.Error())
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		panic("config: " + err.Error())
+	}
+	if err := config.ApplyBootstrapEnvOverrides(cfg); err != nil {
+		panic("config: " + err.Error())
+	}
+	promotedSQLite := config.PromoteLegacySQLite(cfg)
+	if promotedSQLite {
+		if err := config.WriteConfigAtomic(path, cfg); err != nil {
+			panic("config: promote sqlite to turso: " + err.Error())
+		}
+	}
+	if err := config.EnsureRelayInstanceIDFile(cfg, path); err != nil {
+		panic("config: ensure relay instance id: " + err.Error())
+	}
+	relayInst := config.ResolveRelayInstance(cfg)
+	secretsPath := relayidentity.ResolvePath(path)
+	relayID, err := relayidentity.Load(secretsPath)
+	if err != nil {
+		panic("relay identity: " + err.Error())
+	}
+	log := setupLogger(cfg)
+	if promotedSQLite {
+		log.Info().Int("dsn_len", len(cfg.Database.DSN)).Msg("sqlite config promoted to turso")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	storeDB, err := db.Open(ctx, cfg.Database, relayInst.EffectiveID, log)
+	if err != nil {
+		log.Fatal().Err(err).Msg("database open failed")
+	}
+	audit.StartAsyncWriter(ctx, storeDB, log)
+	defer audit.StopAsyncWriter()
+	dbClosed := false
+	defer func() {
+		if !dbClosed {
+			_ = storeDB.Close()
+		}
+	}()
+
+	srv, err := relay.NewConduitServer(cfg, storeDB, log, relayID)
+	if err != nil {
+		log.Fatal().Err(err).Msg("relay server init failed")
+	}
+	srv.SetConfigPath(path)
+	go relay.RunImportedEventFanout(ctx, srv, storeDB, storeDB.EventNotifier, log)
+	if err := nips.LoadEnabled(cfg, srv, storeDB, log); err != nil {
+		log.Fatal().Err(err).Msg("nips load failed")
+	}
+
+	pluginMgr := plugin.NewManager(cfg, path, storeDB, log)
+	if err := pluginMgr.Start(ctx); err != nil {
+		log.Fatal().Err(err).Msg("plugin manager start failed")
+	}
+	defer pluginMgr.Stop()
+	srv.SetPluginRuntime(pluginMgr)
+
+	var upstreamSched *upstream.Scheduler
+	if config.NIP77Enabled(cfg) && cfg.NIP77.UpstreamEnabled && len(cfg.NIP77.Upstreams) > 0 {
+		upstreamSched = upstream.NewScheduler(cfg, storeDB, srv, relayID, log)
+		upstreamSched.Start(ctx)
+		defer upstreamSched.Stop()
+	}
+
+	audit.StartRetentionLoop(ctx, storeDB, cfg.Audit.RetentionDays, log)
+
+	addr := relayListenAddr(cfg)
+	go func() {
+		log.Info().Str("addr", addr).Msg("relay listening")
+		if err := srv.ListenAndServe(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error().Err(err).Msg("relay server stopped")
+			cancel()
+		}
+	}()
+
+	restartCh := make(chan struct{}, 1)
+	scheduleRestart := func() {
+		select {
+		case restartCh <- struct{}{}:
+		default:
+		}
+	}
+
+	var adminSrv *admin.Server
+	if admin.Enabled() {
+		staticDir := filepath.Join("web", "admin", "build")
+		adminSrv = admin.NewServer(cfg, path, storeDB, srv, log, admin.AdminPassword(), staticDir, scheduleRestart, relayID, relayInst, pluginMgr)
+		go func() {
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error().Err(err).Msg("admin server stopped")
+				cancel()
+			}
+		}()
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	doRestart := false
+	select {
+	case <-sig:
+		log.Info().Msg("shutdown signal")
+	case <-restartCh:
+		log.Info().Msg("restart requested from admin api")
+		doRestart = true
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("relay shutdown error")
+	}
+	if adminSrv != nil {
+		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("admin shutdown error")
+		}
+	}
+	cancel()
+
+	if doRestart {
+		dbClosed = true
+		_ = storeDB.Close()
+		restartProcess(log)
+		return
+	}
+
+	log.Info().Msg("bye")
+}
+
+// tryPrintVersion handles "congee version" and -version/--version without touching config or the network.
+func tryPrintVersion(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	switch args[1] {
+	case "version", "-version", "--version":
+		fmt.Println(version.Version)
+		return true
+	default:
+		return false
+	}
+}
+
+// tryLoadDotenv loads ./.env from the process working directory when the file exists.
+// Variables already set in the environment are not overridden (same as godotenv default).
+// Missing .env is normal (e.g. production); parse/read errors are printed to stderr.
+func tryLoadDotenv() {
+	const name = ".env"
+	st, err := os.Stat(name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "congee: %s: %v\n", name, err)
+		return
+	}
+	if st.IsDir() {
+		fmt.Fprintf(os.Stderr, "congee: %s is a directory, skipping\n", name)
+		return
+	}
+	if err := godotenv.Load(name); err != nil {
+		fmt.Fprintf(os.Stderr, "congee: loading %s: %v\n", name, err)
+	}
+}
+
+func relayListenAddr(cfg *config.Config) string {
+	if cfg.Relay.Port <= 0 {
+		return ":3334"
+	}
+	return ":" + strconv.Itoa(cfg.Relay.Port)
+}
+
+func restartProcess(log zerolog.Logger) {
+	if runtime.GOOS == "windows" {
+		log.Warn().Msg("automatic restart is not supported on windows; exiting")
+		os.Exit(0)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		log.Error().Err(err).Msg("restart: executable path")
+		os.Exit(1)
+	}
+	env := os.Environ()
+	if err := syscall.Exec(exe, os.Args, env); err != nil {
+		log.Error().Err(err).Msg("restart: exec failed")
+		os.Exit(1)
+	}
+}
+
+func setupLogger(cfg *config.Config) zerolog.Logger {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	var out io.Writer = os.Stderr
+	if cfg.Logging.Format == "console" {
+		out = zerolog.ConsoleWriter{Out: os.Stderr}
+	}
+	level, err := zerolog.ParseLevel(cfg.Logging.Level)
+	if err != nil {
+		level = zerolog.InfoLevel
+	}
+	return zerolog.New(out).Level(level).With().Timestamp().Logger()
+}

@@ -1,0 +1,12 @@
+.git
+.cursor
+.codex
+.opencode
+bin
+web/admin/node_modules
+web/admin/.svelte-kit
+web/admin/build
+*.db*
+dist
+.env
+relay.secrets.json

@@ -1,0 +1,95 @@
+name: Congee
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["congee-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: congee-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Congee tests and race checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "1"
+    defaults:
+      run:
+        working-directory: congee
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: |
+            congee/go.sum
+            congee/sdk/plugin/go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
+      - name: Test plugin SDK
+        working-directory: congee/sdk/plugin
+        run: go test -race -count=1 ./...
+
+  image:
+    name: Congee image and entrypoint smoke
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read pinned version and validate release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          version="$(cat congee/VERSION)"
+          [[ "$version" =~ ^congee-v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          if [[ "$IS_TAG" == true ]]; then
+            test "$RELEASE_TAG" = "$version"
+            git merge-base --is-ancestor HEAD origin/main
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: congee
+          load: true
+          tags: ghcr.io/conduit-btc/conduit-relay:${{ steps.version.outputs.value }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            GIT_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke actual production entrypoint
+        run: python3 scripts/congee-smoke.py ghcr.io/conduit-btc/conduit-relay:${{ steps.version.outputs.value }}
+      - uses: docker/login-action@v4
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested release image
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: docker push "ghcr.io/conduit-btc/conduit-relay:$VERSION"

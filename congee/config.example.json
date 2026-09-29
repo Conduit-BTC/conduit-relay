@@ -1,0 +1,95 @@
+{
+  "relay": {
+    "port": 3334
+  },
+  "admin": {
+    "port": 3335
+  },
+  "database": {
+    "type": "turso",
+    "dsn": "./congee.db",
+    "meta_dsn": "./congee-meta.db"
+  },
+  "_comment_database": "Local files use type turso (libSQL). PostgreSQL uses type postgres. Legacy sqlite is rewritten to turso on boot.",
+  "logging": {
+    "level": "info",
+    "format": "json"
+  },
+  "audit": {
+    "retention_days": 30
+  },
+  "metrics": {
+    "relay_bucket_retention_days": 30
+  },
+  "rate_limits": {
+    "events_per_minute_per_connection": 120,
+    "bytes_per_second_per_connection": 1048576,
+    "reqs_per_minute_per_connection": 60,
+    "messages_per_minute_per_ip": 6000
+  },
+  "connection_limits": {
+    "max_open": 10000,
+    "max_open_per_ip": 20,
+    "max_subscriptions_per_connection": 20,
+    "max_filters_per_req": 10,
+    "connections_per_minute_per_ip": 60,
+    "idle_no_event_no_sub_seconds": 90,
+    "read_deadline_seconds": 120,
+    "write_deadline_seconds": 30,
+    "default_query_limit": 500,
+    "query_page_size": 100
+  },
+  "websocket": {
+    "compression_enabled": true,
+    "max_message_bytes": 1048576
+  },
+  "max_subscription_id_length": 128,
+  "nip11": {
+    "name": "Congee",
+    "description": "Nostr relay (example metadata)",
+    "icon_source": "default",
+    "banner_source": "default",
+    "admin_pubkey": "",
+    "contact": "",
+    "software": "https://github.com/michmich112/congee",
+    "cors_allow_any_origin": false
+  },
+  "nip42": {
+    "relay_url": "",
+    "require_auth": "protected_kinds",
+    "created_at_skew_seconds": 600,
+    "require_auth_subscribe_kinds": [],
+    "require_auth_publish_kinds": [],
+    "allowlisted_pubkeys": []
+  },
+  "nip29": {
+    "late_publication_max_past_seconds": 86400,
+    "strict_previous_same_h": false
+  },
+  "nip17": {
+    "reject_gift_wrap_when_disabled": true
+  },
+  "nip77": {
+    "max_records_per_query": 100000,
+    "session_idle_timeout_seconds": 7,
+    "frame_size_limit_bytes": 1048576,
+    "max_concurrent_sessions": 8,
+    "max_concurrent_loads": 2,
+    "neg_open_per_minute_per_connection": 6,
+    "neg_msg_per_minute_per_connection": 120,
+    "backpressure_req_queue_depth": 64,
+    "upstream_enabled": true,
+    "upstream_pause_when_busy": true,
+    "upstream_message_timeout_seconds": 60,
+    "upstreams": []
+  },
+  "nips": {
+    "enabled": [1, 11]
+  },
+  "plugins": {
+    "directory": "",
+    "intercept_timeout_ms": 250,
+    "intercept_log_size": 100,
+    "items": []
+  }
+}

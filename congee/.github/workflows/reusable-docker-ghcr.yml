@@ -1,0 +1,131 @@
+# Reusable: build the project Docker image; optionally push to GHCR.
+# Use push=false to verify the Dockerfile on PRs; push=true for release or nightly images.
+name: Reusable — Docker build (GHCR)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Primary image tag segment (no leading v); also default for binary/OCI version when version_embed is empty
+        type: string
+        required: true
+      version_embed:
+        description: Value for embedded binary Version and OCI image.version label; empty uses version
+        type: string
+        required: false
+        default: ""
+      push:
+        description: Push image to ghcr.io after build
+        type: boolean
+        required: false
+        default: false
+      tag_latest:
+        description: Also tag and push latest (only when push is true)
+        type: boolean
+        required: false
+        default: false
+      image_name:
+        description: Full image name (lowercase). Empty = ghcr.io/<owner>/<repo>
+        type: string
+        required: false
+        default: ""
+      platforms:
+        description: e.g. linux/amd64 or linux/amd64,linux/arm64
+        type: string
+        required: false
+        default: linux/amd64
+      extra_tag_suffixes:
+        description: Comma-separated extra tags for the same image base (e.g. nightly). Only used when push is true.
+        type: string
+        required: false
+        default: ""
+    outputs:
+      image_digest:
+        description: Image digest when build completes (empty if unavailable)
+        value: ${{ jobs.docker.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Required for non-native platforms (e.g. linux/arm64 when the runner is amd64).
+      - uses: docker/setup-qemu-action@v4
+
+      - name: Resolve image name (lowercase)
+        id: img
+        run: |
+          if [ -n "${{ inputs.image_name }}" ]; then
+            echo "name=${{ inputs.image_name }}" >> "$GITHUB_OUTPUT"
+          else
+            lower="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+            echo "name=ghcr.io/${lower}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+
+      - if: ${{ inputs.push }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compose tags
+        id: tags
+        run: |
+          BASE="${{ steps.img.outputs.name }}"
+          {
+            echo "lines<<TAG_EOF"
+            echo "${BASE}:${{ inputs.version }}"
+            if [ "${{ inputs.tag_latest }}" = "true" ]; then
+              echo "${BASE}:latest"
+            fi
+            EXTRA="${{ inputs.extra_tag_suffixes }}"
+            if [ -n "$EXTRA" ]; then
+              IFS=',' read -ra PARTS <<< "$EXTRA"
+              for s in "${PARTS[@]}"; do
+                t="$(echo "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                if [ -n "$t" ]; then
+                  echo "${BASE}:${t}"
+                fi
+              done
+            fi
+            echo "TAG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve binary VERSION build-arg
+        id: vbin
+        env:
+          EMBED: ${{ inputs.version_embed }}
+          VER: ${{ inputs.version }}
+        run: |
+          if [ -n "$EMBED" ]; then
+            echo "build_version=$EMBED" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_version=$VER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ inputs.push }}
+          platforms: ${{ inputs.platforms }}
+          build-args: |
+            VERSION=${{ steps.vbin.outputs.build_version }}
+            GIT_REVISION=${{ github.sha }}
+          tags: ${{ steps.tags.outputs.lines }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Multi-platform builds cannot load into docker; cacheonly still
+          # compiles every stage when we are only verifying (push=false).
+          outputs: ${{ inputs.push == true && 'type=image,push=true' || 'type=cacheonly' }}

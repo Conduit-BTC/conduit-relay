@@ -1,0 +1,24 @@
+bin/
+web/admin/node_modules/
+build/
+web/admin/build/
+.svelte-kit/
+web/admin/.svelte-kit/
+*.db*
+dist/
+.env
+config.json
+
+.codex
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+.opencode
+
+# Local planning / OpenSpec workflow (not versioned for now)
+docs/plans/
+openspec/
+*.secrets.json
+
+# Local plugin installs (binaries + data)
+/plugins/

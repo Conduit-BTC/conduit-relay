@@ -1,0 +1,748 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { adminFetch } from '$lib/admin-api';
+	import { describeNostrKind, knownKindDropdownEntries } from '$lib/nostr-kind-descriptions';
+	import { buttonVariants } from '$lib/components/ui/button/button.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import * as Command from '$lib/components/ui/command';
+	import * as Dialog from '$lib/components/ui/dialog';
+	import { Input } from '$lib/components/ui/input';
+	import { Label } from '$lib/components/ui/label';
+	import * as Popover from '$lib/components/ui/popover';
+	import Check from '@lucide/svelte/icons/check';
+	import ClipboardList from '@lucide/svelte/icons/clipboard-list';
+	import ChevronDown from '@lucide/svelte/icons/chevron-down';
+	import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
+	import Expand from '@lucide/svelte/icons/expand';
+	import { cn } from '$lib/utils';
+	import TableTimestampModeSelect from '$lib/components/TableTimestampModeSelect.svelte';
+	import TimestampCell from '$lib/components/TimestampCell.svelte';
+	import AdminPageHeading from '$lib/components/AdminPageHeading.svelte';
+	import * as Card from '$lib/components/ui/card';
+	import * as Table from '$lib/components/ui/table';
+
+	type Entry = {
+		created_at: number;
+		action: string;
+		detail: string;
+		pubkey: string;
+	};
+
+	type StoredEvent = {
+		id: string;
+		pubkey: string;
+		created_at: number;
+		kind: number;
+	};
+
+	const PAGE_SIZES = [50, 100, 250, 500, 1000] as const;
+	type PageSize = (typeof PAGE_SIZES)[number];
+
+	const selectClass =
+		'border-input dark:bg-input/30 focus-visible:border-ring focus-visible:ring-ring/50 h-8 w-full rounded-lg border bg-transparent px-2.5 text-sm shadow-xs outline-none focus-visible:ring-3 disabled:cursor-not-allowed disabled:opacity-50';
+
+	const selectClassNarrow =
+		selectClass + ' max-w-[140px]';
+
+	const AUDIT_ACTION_OPTIONS = [
+		{ value: '', label: 'Any action' },
+		{ value: 'event_stored', label: 'event_stored' },
+		{ value: 'event_ephemeral', label: 'event_ephemeral' },
+		{ value: 'event_rejected', label: 'event_rejected' }
+	] as const;
+
+	function mergeKindFilterOptions(persistedKinds: number[]): { kind: number; label: string }[] {
+		const known = knownKindDropdownEntries();
+		const out: { kind: number; label: string }[] = [...known];
+		const seen = new Set(known.map((e) => e.kind));
+		for (const k of persistedKinds) {
+			if (!seen.has(k)) {
+				seen.add(k);
+				out.push({ kind: k, label: `${k} — ${describeNostrKind(k)}` });
+			}
+		}
+		out.sort((a, b) => a.kind - b.kind);
+		return out;
+	}
+
+	const eventIDInDetail = /event_id=([0-9a-f]{64})/i;
+	/** Trailing field from NIP-01 post-hook detail (same suffix the /api/audit?kind= filter uses). */
+	const kindSuffixInDetail = / kind=(\d+)$/;
+
+	function parseAuditEventId(detail: string): string | null {
+		const m = detail.match(eventIDInDetail);
+		return m ? m[1].toLowerCase() : null;
+	}
+
+	function parseAuditKind(detail: string): number | null {
+		const m = detail.match(kindSuffixInDetail);
+		if (!m) return null;
+		const n = Number.parseInt(m[1], 10);
+		return Number.isFinite(n) ? n : null;
+	}
+
+	function shortEventId(hex: string): string {
+		return hex.length <= 10 ? hex : `${hex.slice(0, 8)}…`;
+	}
+
+	function isPageSize(n: number): n is PageSize {
+		return (PAGE_SIZES as readonly number[]).includes(n);
+	}
+
+	let entries = $state<Entry[]>([]);
+	let total = $state(0);
+	let err = $state<string | null>(null);
+	let loading = $state(true);
+
+	let storedEvents = $state<StoredEvent[]>([]);
+	let storedTotal = $state(0);
+	let storedErr = $state<string | null>(null);
+	let storedLoading = $state(false);
+	let storedPage = $state(1);
+
+	let page = $state(1);
+	let pageSize = $state<PageSize>(50);
+	let action = $state('');
+	let pubkey = $state('');
+	let sinceDate = $state('');
+	let untilDate = $state('');
+	let selectedKinds = $state<number[]>([]);
+	let kindOptions = $state<{ kind: number; label: string }[]>(knownKindDropdownEntries());
+	let kindComboboxOpen = $state(false);
+
+	let dialogOpen = $state(false);
+	let selectedEventId = $state<string | null>(null);
+	let eventBody = $state<string | null>(null);
+	let eventLoadErr = $state<string | null>(null);
+	let eventLoading = $state(false);
+
+	let auditDetailDialogOpen = $state(false);
+	let auditDetailFull = $state('');
+
+	function localDayStartUnix(isoDate: string): number {
+		const [y, m, d] = isoDate.split('-').map((x) => Number.parseInt(x, 10));
+		return Math.floor(new Date(y, m - 1, d, 0, 0, 0, 0).getTime() / 1000);
+	}
+
+	function localDayEndUnix(isoDate: string): number {
+		const [y, m, d] = isoDate.split('-').map((x) => Number.parseInt(x, 10));
+		return Math.floor(new Date(y, m - 1, d, 23, 59, 59, 999).getTime() / 1000);
+	}
+
+	const rangeLabel = $derived.by(() => {
+		if (total === 0) {
+			return '0 rows (with current filters)';
+		}
+		const from = (page - 1) * pageSize + 1;
+		const to = Math.min(page * pageSize, total);
+		return `Rows ${from}–${to} of ${total}`;
+	});
+
+	const totalPages = $derived(Math.max(1, Math.ceil(total / pageSize)));
+
+	const storedRangeLabel = $derived.by(() => {
+		if (selectedKinds.length === 0) {
+			return '';
+		}
+		if (storedTotal === 0) {
+			return '0 stored events (with current filters)';
+		}
+		const from = (storedPage - 1) * pageSize + 1;
+		const to = Math.min(storedPage * pageSize, storedTotal);
+		return `Rows ${from}–${to} of ${storedTotal}`;
+	});
+
+	const storedTotalPages = $derived(Math.max(1, Math.ceil(storedTotal / pageSize)));
+
+	const kindComboboxTriggerLabel = $derived.by(() => {
+		if (selectedKinds.length === 0) return 'Any kinds';
+		if (selectedKinds.length <= 4) return selectedKinds.join(', ');
+		return `${selectedKinds.length} kinds selected`;
+	});
+
+	const hasNonDefaultFilters = $derived.by(() => {
+		return (
+			sinceDate !== '' ||
+			untilDate !== '' ||
+			selectedKinds.length > 0 ||
+			action !== '' ||
+			pubkey.trim() !== ''
+		);
+	});
+
+	async function loadKindOptions() {
+		try {
+			const res = await adminFetch('/api/audit/kinds');
+			if (!res.ok) {
+				kindOptions = knownKindDropdownEntries();
+				return;
+			}
+			const data = (await res.json()) as { kinds?: number[] };
+			kindOptions = mergeKindFilterOptions(data.kinds ?? []);
+		} catch {
+			kindOptions = knownKindDropdownEntries();
+		}
+	}
+
+	function toggleKindFromCombobox(kind: number) {
+		if (selectedKinds.includes(kind)) {
+			selectedKinds = selectedKinds.filter((k) => k !== kind);
+		} else {
+			selectedKinds = [...selectedKinds, kind].sort((a, b) => a - b);
+		}
+		void applyFilters();
+	}
+
+	async function clearAllFilters() {
+		sinceDate = '';
+		untilDate = '';
+		selectedKinds = [];
+		action = '';
+		pubkey = '';
+		page = 1;
+		storedPage = 1;
+		await load();
+	}
+
+	async function loadAudit(allowClampRetry = true) {
+		loading = true;
+		err = null;
+		try {
+			const q = new URLSearchParams();
+			q.set('limit', String(pageSize));
+			q.set('offset', String((page - 1) * pageSize));
+			if (sinceDate) q.set('since', String(localDayStartUnix(sinceDate)));
+			if (untilDate) q.set('until', String(localDayEndUnix(untilDate)));
+			if (action) q.set('action', action);
+			if (pubkey) q.set('pubkey', pubkey);
+			for (const k of selectedKinds) {
+				q.append('kind', String(k));
+			}
+			const res = await adminFetch(`/api/audit?${q}`);
+			if (!res.ok) {
+				err = await res.text();
+				return;
+			}
+			const data = (await res.json()) as { entries: Entry[]; total?: number };
+			entries = data.entries ?? [];
+			total = typeof data.total === 'number' ? data.total : 0;
+			const tp = Math.max(1, Math.ceil(total / pageSize));
+			if (page > tp) {
+				page = tp;
+				if (allowClampRetry) {
+					await loadAudit(false);
+				}
+			}
+		} catch (e) {
+			err = e instanceof Error ? e.message : String(e);
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function loadStored(allowClampRetry = true) {
+		if (selectedKinds.length === 0) {
+			storedEvents = [];
+			storedTotal = 0;
+			storedErr = null;
+			storedLoading = false;
+			return;
+		}
+		storedLoading = true;
+		storedErr = null;
+		try {
+			const q = new URLSearchParams();
+			q.set('limit', String(pageSize));
+			q.set('offset', String((storedPage - 1) * pageSize));
+			if (sinceDate) q.set('since', String(localDayStartUnix(sinceDate)));
+			if (untilDate) q.set('until', String(localDayEndUnix(untilDate)));
+			if (pubkey) q.set('pubkey', pubkey);
+			for (const k of selectedKinds) {
+				q.append('kind', String(k));
+			}
+			const res = await adminFetch(`/api/events?${q}`);
+			if (!res.ok) {
+				storedErr = await res.text();
+				return;
+			}
+			const data = (await res.json()) as { events?: StoredEvent[]; total?: number };
+			storedEvents = data.events ?? [];
+			storedTotal = typeof data.total === 'number' ? data.total : 0;
+			const tp = Math.max(1, Math.ceil(storedTotal / pageSize));
+			if (storedPage > tp) {
+				storedPage = tp;
+				if (allowClampRetry) {
+					await loadStored(false);
+				}
+			}
+		} catch (e) {
+			storedErr = e instanceof Error ? e.message : String(e);
+		} finally {
+			storedLoading = false;
+		}
+	}
+
+	async function load(allowClampRetry = true) {
+		await Promise.all([loadAudit(allowClampRetry), loadStored(allowClampRetry)]);
+	}
+
+	async function applyFilters() {
+		page = 1;
+		storedPage = 1;
+		await load();
+	}
+
+	function goPrev() {
+		if (page <= 1) return;
+		page -= 1;
+		void loadAudit();
+	}
+
+	function goNext() {
+		if (page >= totalPages) return;
+		page += 1;
+		void loadAudit();
+	}
+
+	function goStoredPrev() {
+		if (storedPage <= 1) return;
+		storedPage -= 1;
+		void loadStored();
+	}
+
+	function goStoredNext() {
+		if (storedPage >= storedTotalPages) return;
+		storedPage += 1;
+		void loadStored();
+	}
+
+	function onPageSizeChange(ev: Event) {
+		const v = Number.parseInt((ev.currentTarget as HTMLSelectElement).value, 10);
+		pageSize = isPageSize(v) ? v : 50;
+		page = 1;
+		storedPage = 1;
+		void load();
+	}
+
+	function openAuditDetailModal(detail: string) {
+		auditDetailFull = detail;
+		auditDetailDialogOpen = true;
+	}
+
+	async function openEventModal(eventId: string) {
+		selectedEventId = eventId;
+		eventBody = null;
+		eventLoadErr = null;
+		eventLoading = true;
+		dialogOpen = true;
+		try {
+			const res = await adminFetch(`/api/events/${eventId}`);
+			if (res.status === 404) {
+				eventLoadErr =
+					'Event not found in storage (ephemeral kinds are not persisted, or data was deleted). Audit row still shows the id from when it was accepted.';
+				return;
+			}
+			if (!res.ok) {
+				const t = await res.text();
+				eventLoadErr = t || `HTTP ${res.status}`;
+				return;
+			}
+			const data = (await res.json()) as { event: Record<string, unknown> };
+			eventBody = JSON.stringify(data.event, null, 2);
+		} catch (e) {
+			eventLoadErr = e instanceof Error ? e.message : String(e);
+		} finally {
+			eventLoading = false;
+		}
+	}
+
+	$effect(() => {
+		if (!dialogOpen) {
+			selectedEventId = null;
+			eventBody = null;
+			eventLoadErr = null;
+			eventLoading = false;
+		}
+	});
+
+	$effect(() => {
+		if (!auditDetailDialogOpen) {
+			auditDetailFull = '';
+		}
+	});
+
+	onMount(() => {
+		void loadKindOptions();
+		void load();
+	});
+</script>
+
+<div class="space-y-6">
+	<AdminPageHeading
+		title="Audit · Events"
+		subtitle="Audit log rows are relay activity (accept/reject). Kind filters also search the event store, so backfilled events with no audit row still appear."
+		Icon={ClipboardList}
+	/>
+
+	<Card.Root>
+		<Card.Content class="pt-6">
+			<div class="grid gap-4 md:grid-cols-3">
+				<div class="space-y-2">
+					<Label for="since-date">Since (date)</Label>
+					<Input id="since-date" type="date" bind:value={sinceDate} class="block w-full min-w-0" />
+				</div>
+				<div class="space-y-2">
+					<Label for="until-date">Until (date)</Label>
+					<Input id="until-date" type="date" bind:value={untilDate} class="block w-full min-w-0" />
+				</div>
+				<div class="space-y-2">
+					<Label for="kind-combobox-anchor">Kinds</Label>
+					<Popover.Root bind:open={kindComboboxOpen}>
+						<Popover.Trigger
+							id="kind-combobox-anchor"
+							class={cn(
+								buttonVariants({ variant: 'outline', size: 'default' }),
+								'h-9 w-full min-w-0 justify-between font-normal'
+							)}
+							role="combobox"
+							aria-expanded={kindComboboxOpen}
+						>
+							<span class="truncate text-left">{kindComboboxTriggerLabel}</span>
+							<ChevronsUpDown class="size-4 shrink-0 opacity-50" />
+						</Popover.Trigger>
+						<Popover.Content class="p-0 sm:w-[min(100vw-2rem,22rem)]" align="start">
+							<Command.Root>
+								<Command.Input placeholder="Search kinds…" />
+								<Command.List>
+									<Command.Empty>No kinds match.</Command.Empty>
+									<Command.Group>
+										{#each kindOptions as opt (opt.kind)}
+											<Command.Item
+												value={String(opt.kind)}
+												keywords={[String(opt.kind), opt.label]}
+												onSelect={() => {
+													toggleKindFromCombobox(opt.kind);
+												}}
+											>
+												<Check
+													class={cn(
+														'mr-2 size-4 shrink-0',
+														selectedKinds.includes(opt.kind) ? 'opacity-100' : 'opacity-0'
+													)}
+												/>
+												<span class="truncate" title={describeNostrKind(opt.kind)}>{opt.label}</span>
+											</Command.Item>
+										{/each}
+									</Command.Group>
+								</Command.List>
+							</Command.Root>
+						</Popover.Content>
+					</Popover.Root>
+				</div>
+			</div>
+
+			<details class="group mt-5 rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2">
+				<summary
+					class="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-foreground outline-none marker:content-none [&::-webkit-details-marker]:hidden"
+				>
+					<ChevronDown
+						class="text-muted-foreground size-4 shrink-0 transition-transform group-open:rotate-180"
+						aria-hidden="true"
+					/>
+					More filters
+				</summary>
+				<div class="mt-4 grid gap-4 border-t border-border pt-4 sm:grid-cols-2">
+					<div class="space-y-2">
+						<Label for="pk">Pubkey</Label>
+						<Input id="pk" bind:value={pubkey} placeholder="exact hex" class="w-full" />
+					</div>
+					<div class="space-y-2">
+						<Label for="act">Action</Label>
+						<select
+							id="act"
+							class={selectClass}
+							bind:value={action}
+							aria-label="Audit action filter"
+						>
+							{#each AUDIT_ACTION_OPTIONS as opt (opt.value)}
+								<option value={opt.value}>{opt.label}</option>
+							{/each}
+						</select>
+					</div>
+				</div>
+			</details>
+		</Card.Content>
+		<Card.Footer class="flex flex-wrap items-center justify-end gap-2 border-t bg-muted/30 p-4">
+			{#if hasNonDefaultFilters}
+				<Button type="button" variant="ghost" size="sm" onclick={() => void clearAllFilters()}>
+					Clear all
+				</Button>
+			{/if}
+			<Button type="button" onclick={() => void applyFilters()}>Apply filters</Button>
+		</Card.Footer>
+	</Card.Root>
+
+	{#if err}
+		<p class="text-sm text-destructive">{err}</p>
+	{/if}
+
+	<Dialog.Root bind:open={dialogOpen}>
+		<Dialog.Content class="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+			<Dialog.Header>
+				<Dialog.Title class="font-mono text-sm tracking-normal">
+					{selectedEventId ?? 'Event'}
+				</Dialog.Title>
+				<Dialog.Description>
+					Event JSON from relay storage. Ephemeral events and older audit rows without
+					<code class="text-xs">event_id=…</code> in the detail cannot be loaded here.
+				</Dialog.Description>
+			</Dialog.Header>
+			<div class="min-h-[120px]">
+				{#if eventLoading}
+					<p class="text-sm text-muted-foreground">Loading…</p>
+				{:else if eventLoadErr}
+					<p class="text-sm text-destructive">{eventLoadErr}</p>
+				{:else if eventBody}
+					<pre
+						class="max-h-[55vh] overflow-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap break-all"
+						>{eventBody}</pre
+					>
+				{/if}
+			</div>
+		</Dialog.Content>
+	</Dialog.Root>
+
+	<Dialog.Root bind:open={auditDetailDialogOpen}>
+		<Dialog.Content class="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+			<Dialog.Header>
+				<Dialog.Title>Audit detail</Dialog.Title>
+				<Dialog.Description>Full text from the audit log row.</Dialog.Description>
+			</Dialog.Header>
+			{#if auditDetailFull}
+				<pre
+					class="max-h-[65vh] overflow-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap break-all"
+					>{auditDetailFull}</pre
+				>
+			{/if}
+		</Dialog.Content>
+	</Dialog.Root>
+
+	{#if selectedKinds.length > 0}
+		<div class="space-y-2">
+			<div>
+				<h2 class="text-base font-semibold">Stored events</h2>
+				<p class="text-muted-foreground text-sm">
+					Relay event store (NIP-01), not the audit log. Events imported or backfilled without an
+					audit row still appear here.
+				</p>
+			</div>
+			{#if storedErr}
+				<p class="text-sm text-destructive">{storedErr}</p>
+			{/if}
+			{#if storedLoading && storedEvents.length === 0}
+				<p class="text-sm text-muted-foreground">Loading stored events…</p>
+			{:else}
+				<div class="overflow-hidden rounded-lg border border-border">
+					<div class="overflow-x-auto">
+						<Table.Root>
+							<Table.Header>
+								<Table.Row>
+									<Table.Head class="whitespace-nowrap">Created</Table.Head>
+									<Table.Head class="whitespace-nowrap text-right">Kind</Table.Head>
+									<Table.Head class="whitespace-nowrap">Event ID</Table.Head>
+									<Table.Head>Pubkey</Table.Head>
+								</Table.Row>
+							</Table.Header>
+							<Table.Body>
+								{#each storedEvents as row (row.id)}
+									<Table.Row>
+										<Table.Cell><TimestampCell unixValue={row.created_at} /></Table.Cell>
+										<Table.Cell class="text-right font-mono text-xs tabular-nums">
+											<span
+												class="cursor-help border-b border-dotted border-muted-foreground/60"
+												title={describeNostrKind(row.kind)}>{row.kind}</span
+											>
+										</Table.Cell>
+										<Table.Cell class="font-mono text-xs">
+											<button
+												type="button"
+												class="cursor-pointer text-left text-primary underline-offset-2 hover:underline"
+												title={row.id}
+												onclick={() => void openEventModal(row.id)}
+											>
+												{shortEventId(row.id)}
+											</button>
+										</Table.Cell>
+										<Table.Cell class="max-w-[200px] truncate font-mono text-xs" title={row.pubkey}
+											>{row.pubkey || '—'}</Table.Cell
+										>
+									</Table.Row>
+								{:else}
+									<Table.Row>
+										<Table.Cell colspan={4} class="text-center text-sm text-muted-foreground"
+											>No stored events for these kinds</Table.Cell
+										>
+									</Table.Row>
+								{/each}
+							</Table.Body>
+						</Table.Root>
+					</div>
+					<div
+						class="flex flex-col gap-3 border-t border-border bg-muted/20 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"
+					>
+						<p class="text-sm text-muted-foreground">{storedRangeLabel}</p>
+						<div class="flex flex-wrap items-center gap-2">
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								disabled={storedPage <= 1}
+								onclick={goStoredPrev}
+							>
+								Previous
+							</Button>
+							<span class="text-sm tabular-nums text-muted-foreground"
+								>Page {storedPage} / {storedTotalPages}</span
+							>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								disabled={storedPage >= storedTotalPages}
+								onclick={goStoredNext}
+							>
+								Next
+							</Button>
+						</div>
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	{#if loading}
+		<p class="text-sm text-muted-foreground">Loading audit log…</p>
+	{:else}
+		<div class="space-y-2">
+			<div>
+				<h2 class="text-base font-semibold">Audit log</h2>
+				<p class="text-muted-foreground text-sm">
+					Rows written when this relay accepted, rejected, or saw an event. Matching is a trailing
+					<code class="text-xs">kind=N</code> suffix on the detail string — not a catalog of stored
+					events.
+				</p>
+			</div>
+		<div class="overflow-hidden rounded-lg border border-border">
+			<div
+				class="flex flex-wrap items-center justify-end gap-3 border-b border-border bg-muted/30 px-3 py-2"
+			>
+				<TableTimestampModeSelect selectId="audit-table-timestamps" />
+			</div>
+			<div class="overflow-x-auto">
+				<Table.Root>
+					<Table.Header>
+						<Table.Row>
+							<Table.Head class="whitespace-nowrap">Time</Table.Head>
+							<Table.Head>Action</Table.Head>
+							<Table.Head class="whitespace-nowrap text-right">Kind</Table.Head>
+							<Table.Head class="whitespace-nowrap">Event ID</Table.Head>
+							<Table.Head>Pubkey</Table.Head>
+							<Table.Head>Detail</Table.Head>
+						</Table.Row>
+					</Table.Header>
+					<Table.Body>
+						{#each entries as row, i (i + '-' + row.created_at + '-' + row.action + '-' + row.detail)}
+							{@const eid = parseAuditEventId(row.detail)}
+							{@const kind = parseAuditKind(row.detail)}
+							<Table.Row>
+								<Table.Cell><TimestampCell unixValue={row.created_at} /></Table.Cell>
+								<Table.Cell class="text-sm">{row.action}</Table.Cell>
+								<Table.Cell class="text-right font-mono text-xs tabular-nums">
+									{#if kind !== null}
+										<span class="cursor-help border-b border-dotted border-muted-foreground/60" title={describeNostrKind(kind)}
+											>{kind}</span
+										>
+									{:else}
+										<span class="text-muted-foreground">—</span>
+									{/if}
+								</Table.Cell>
+								<Table.Cell class="font-mono text-xs">
+									{#if eid}
+										<button
+											type="button"
+											class="cursor-pointer text-left text-primary underline-offset-2 hover:underline"
+											title={eid}
+											onclick={() => void openEventModal(eid)}
+										>
+											{shortEventId(eid)}
+										</button>
+									{:else}
+										<span class="text-muted-foreground">—</span>
+									{/if}
+								</Table.Cell>
+								<Table.Cell class="max-w-[200px] truncate font-mono text-xs" title={row.pubkey}
+									>{row.pubkey || '—'}</Table.Cell
+								>
+								<Table.Cell class="max-w-[min(12rem,32vw)] whitespace-normal py-1.5 align-middle">
+									<div class="flex items-center gap-0.5 leading-none">
+										<span
+											class="min-w-0 flex-1 truncate text-xs leading-tight text-muted-foreground"
+											title={row.detail}>{row.detail || '—'}</span
+										>
+										{#if row.detail}
+											<Button
+												type="button"
+												variant="ghost"
+												size="icon-sm"
+												class="size-6 shrink-0 text-muted-foreground hover:text-foreground [&_svg]:size-3.5"
+												aria-label="View full audit detail"
+												onclick={() => openAuditDetailModal(row.detail)}
+											>
+												<Expand />
+											</Button>
+										{/if}
+									</div>
+								</Table.Cell>
+							</Table.Row>
+						{:else}
+							<Table.Row>
+								<Table.Cell colspan={6} class="text-center text-sm text-muted-foreground">No rows</Table.Cell>
+							</Table.Row>
+						{/each}
+					</Table.Body>
+				</Table.Root>
+			</div>
+			<div
+				class="flex flex-col gap-3 border-t border-border bg-muted/20 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"
+			>
+				<p class="text-sm text-muted-foreground">{rangeLabel}</p>
+				<div class="flex flex-wrap items-center gap-4">
+					<div class="flex items-center gap-2">
+						<Label for="page-size" class="text-muted-foreground shrink-0 text-sm font-normal">Per page</Label>
+						<select
+							id="page-size"
+							class={selectClassNarrow}
+							value={String(pageSize)}
+							onchange={onPageSizeChange}
+							aria-label="Results per page"
+						>
+							{#each PAGE_SIZES as sz (sz)}
+								<option value={String(sz)}>{sz}</option>
+							{/each}
+						</select>
+					</div>
+					<div class="flex flex-wrap items-center gap-2">
+						<Button type="button" variant="outline" size="sm" disabled={page <= 1} onclick={goPrev}>
+							Previous
+						</Button>
+						<span class="text-sm tabular-nums text-muted-foreground">Page {page} / {totalPages}</span>
+						<Button type="button" variant="outline" size="sm" disabled={page >= totalPages} onclick={goNext}>
+							Next
+						</Button>
+					</div>
+				</div>
+			</div>
+		</div>
+		</div>
+	{/if}
+</div>
