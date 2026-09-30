@@ -13,6 +13,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Search index repair: [upstream PR 53](https://github.com/michmich112/congee/pull/53), commit `6dddeca251427d0e5612b01605a19473255c5d4c`.
 - Conduit changes: strict browser origins, positive duplicate acknowledgments after validation, and startup validation of the schema-8 search layout.
 - Review hardening: reject padded recipient keys and reserve NIP-77 session capacity atomically, including queued loads and replacements.
+- Admission hardening: trust forwarded client IPs only from configured proxies, reserve global connection capacity atomically, and close failed writers.
+- Storage and payload hardening: record fresh PostgreSQL migrations atomically and bound WebSocket payload expansion during reads.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.
@@ -33,6 +35,20 @@ Accept these WebSocket origins:
 The default HTTPS port, including explicit `:443`, is allowed. Reject missing origins, `null`, other hosts, paths, credentials, and other ports. Reject denied upgrades before connection admission or rate-limit accounting. Public health and NIP-11 discovery remain available. Browser discovery and image responses reflect only an allowed origin.
 
 Origin checks limit browser access. They do not authenticate clients: a non-browser client can set an Origin header. Keep event validation, authentication, and rate limits enabled.
+
+## Proxy and connection admission
+
+The global connection cap includes pending upgrades. Failed admission releases its reservation.
+Direct connections use the socket peer IP and ignore all client-IP headers.
+
+Before deployment, configure `connection_limits.trusted_proxy_cidrs` with the actual ingress proxy networks.
+An empty list trusts no proxy. Do not use public client networks or catch-all CIDRs.
+Select `connection_limits.trusted_proxy_client_ip_header` only when that proxy overwrites the header.
+For Fly HTTP ingress, select [`Fly-Client-IP`](https://www.fly.io/docs/networking/request-headers/); do not trust client-supplied Cloudflare headers through Fly.
+For direct Cloudflare ingress, select `CF-Connecting-IP` and trust only that ingress.
+The default `X-Forwarded-For` mode walks the chain from the nearest proxy to the first untrusted address.
+Changes to proxy trust require a restart. Rehearse admission with two clients and forged headers before cutover.
+Stop if clients share an unexpected limiter bucket or a forged header changes their resolved IP.
 
 ## Build and validation
 

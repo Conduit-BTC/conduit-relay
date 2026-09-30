@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -175,6 +176,17 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimits.MessagesPerMinutePerIP <= 0 {
 		return errors.New("config: rate_limits.messages_per_minute_per_ip must be > 0")
+	}
+	for _, cidr := range c.ConnectionLimits.TrustedProxyCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.Bits() == 0 {
+			return errors.New("config: trusted_proxy_cidrs must contain specific valid CIDRs")
+		}
+	}
+	switch httpHeader := strings.ToLower(c.ConnectionLimits.TrustedProxyClientIPHeader); httpHeader {
+	case "", "x-forwarded-for", "fly-client-ip", "cf-connecting-ip", "x-real-ip":
+	default:
+		return errors.New("config: unsupported trusted_proxy_client_ip_header")
 	}
 	if c.ConnectionLimits.MaxOpen <= 0 {
 		return errors.New("config: connection_limits.max_open must be > 0")

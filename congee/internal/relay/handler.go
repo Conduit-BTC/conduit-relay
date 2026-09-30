@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,7 @@ func newConnID() string {
 
 func (c *Conn) writeLoop() {
 	defer close(c.writerDone)
+	defer c.initiateShutdown()
 	wd := time.Duration(c.server.cfg.ConnectionLimits.WriteDeadlineSeconds) * time.Second
 	for b := range c.send {
 		if err := c.nc.SetWriteDeadline(time.Now().Add(wd)); err != nil {
@@ -174,7 +176,11 @@ func readNextTextMessage(conn net.Conn, maxFrame int64) ([]byte, error) {
 			continue
 		}
 		var buf bytes.Buffer
-		_, err = io.Copy(&buf, &rd)
+		src := io.Reader(&rd)
+		if maxFrame > 0 {
+			src = io.LimitReader(src, min(maxFrame, math.MaxInt64-1)+1)
+		}
+		_, err = io.Copy(&buf, src)
 		if err != nil {
 			return nil, err
 		}
@@ -216,6 +222,10 @@ func readOneFlateText(
 		if msg.IsCompressed() {
 			fr.Reset(src)
 			src = fr
+		}
+		// Probe one byte beyond the limit without buffering the full expansion.
+		if maxTotal > 0 {
+			src = io.LimitReader(src, min(maxTotal, math.MaxInt64-1)+1)
 		}
 		if _, err := io.Copy(&payload, src); err != nil {
 			return nil, err

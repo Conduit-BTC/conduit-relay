@@ -85,13 +85,14 @@ func newConduitOriginTestServer(t *testing.T, compression bool, budget int) (*Se
 	})
 	ts := httptest.NewServer(srv.http.Handler)
 	t.Cleanup(func() {
+		// Finish upgrade handlers before waiting for their hijacked connections.
+		ts.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
 		}
 		srv.connWG.Wait()
-		ts.Close()
 	})
 	return srv, ts
 }

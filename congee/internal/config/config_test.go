@@ -536,3 +536,25 @@ func TestEffectivePluginInterceptLogSize(t *testing.T) {
 		t.Fatalf("50: %d", g)
 	}
 }
+
+func TestTrustedProxyConfigValidation(t *testing.T) {
+	for _, cidr := range []string{"not-a-cidr", "192.0.2.1", "0.0.0.0/0", "::/0"} {
+		cfg := DefaultConfig()
+		cfg.ConnectionLimits.TrustedProxyCIDRs = []string{cidr}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid trusted CIDR %q accepted", cidr)
+		}
+	}
+	cfg := DefaultConfig()
+	cfg.ConnectionLimits.TrustedProxyCIDRs = []string{"192.0.2.0/24", "2001:db8::/48"}
+	for _, header := range []string{"", "X-Forwarded-For", "Fly-Client-IP", "CF-Connecting-IP", "X-Real-IP"} {
+		cfg.ConnectionLimits.TrustedProxyClientIPHeader = header
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.ConnectionLimits.TrustedProxyClientIPHeader = "Arbitrary-Client-IP"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported header accepted")
+	}
+}

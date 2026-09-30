@@ -93,6 +93,10 @@ type RateLimitsSection struct {
 
 type ConnectionLimitsSection struct {
 	MaxOpen int `json:"max_open"`
+	// Forwarded client addresses are accepted only from these proxy networks.
+	TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs,omitempty"`
+	// Empty uses X-Forwarded-For; single-address headers require explicit selection.
+	TrustedProxyClientIPHeader string `json:"trusted_proxy_client_ip_header,omitempty"`
 	// MaxOpenPerIP caps concurrent WebSockets per peer IP. Zero disables the cap.
 	MaxOpenPerIP                  int `json:"max_open_per_ip"`
 	MaxSubscriptionsPerConnection int `json:"max_subscriptions_per_connection"`

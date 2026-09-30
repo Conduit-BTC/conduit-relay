@@ -84,14 +84,12 @@ func runMigrations(ctx context.Context, db *bun.DB, log zerolog.Logger) error {
 }
 
 func migrateFresh(ctx context.Context, db *bun.DB, log zerolog.Logger) error {
-	// IF NOT EXISTS / upsert: targets may be half-applied after a failed migrate (e.g. only
-	// congee_schema_version exists while events is still missing).
+	// Keep retries compatible with targets left half-applied by older binaries.
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS congee_schema_version (
 			id SMALLINT PRIMARY KEY CHECK (id = 1),
 			version INT NOT NULL
 		)`,
-		`INSERT INTO congee_schema_version (id, version) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`,
 		`CREATE TABLE IF NOT EXISTS events (
 			id VARCHAR(128) NOT NULL PRIMARY KEY,
 			pubkey VARCHAR(128) NOT NULL,
@@ -118,18 +116,21 @@ func migrateFresh(ctx context.Context, db *bun.DB, log zerolog.Logger) error {
 		`CREATE INDEX IF NOT EXISTS idx_event_tags_name_value ON event_tags (name, value)`,
 	}
 
-	for i, s := range stmts {
-		if i == 1 {
-			log.Debug().Int("ddl_step", i).Msg("schema: upsert congee_schema_version")
-			if _, err := db.ExecContext(ctx, s, schemaVersion); err != nil {
-				return fmt.Errorf("postgres: migrate: %w", err)
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		for i, s := range stmts {
+			log.Debug().Int("ddl_step", i).Msg("schema: exec ddl statement")
+			if _, err := tx.ExecContext(ctx, s); err != nil {
+				return err
 			}
-			continue
 		}
-		log.Debug().Int("ddl_step", i).Msg("schema: exec ddl statement")
-		if _, err := db.ExecContext(ctx, s); err != nil {
-			return fmt.Errorf("postgres: migrate: %w", err)
-		}
+		// Publish the version only after every schema object exists. PostgreSQL
+		// keeps both DDL and this row in the same transaction.
+		log.Debug().Msg("schema: upsert congee_schema_version")
+		_, err := tx.ExecContext(ctx, `INSERT INTO congee_schema_version (id, version) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`, schemaVersion)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: migrate fresh schema: %w", err)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,8 @@ type Server struct {
 	configPath string
 	// Set only during construction by NewConduitServer; no runtime override.
 	conduitOriginsOnly bool
+	trustedProxies     []netip.Prefix
+	clientIPHeader     string
 
 	negQueue          *NegQueue
 	negLoadSlots      chan struct{}
@@ -68,21 +71,40 @@ func NewServer(cfg *config.Config, store storage.Store, log zerolog.Logger, rela
 	if store == nil {
 		return nil, errors.New("relay: nil store")
 	}
+	var trustedProxies []netip.Prefix
+	for _, cidr := range cfg.ConnectionLimits.TrustedProxyCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.Bits() == 0 {
+			return nil, errors.New("relay: invalid trusted proxy CIDR")
+		}
+		trustedProxies = append(trustedProxies, prefix.Masked())
+	}
+	header := http.CanonicalHeaderKey(cfg.ConnectionLimits.TrustedProxyClientIPHeader)
+	if header == "" {
+		header = "X-Forwarded-For"
+	}
+	switch header {
+	case "X-Forwarded-For", "Fly-Client-Ip", "Cf-Connecting-Ip", "X-Real-Ip":
+	default:
+		return nil, errors.New("relay: unsupported trusted proxy client IP header")
+	}
 	mctx, mcancel := context.WithCancel(context.Background())
 	s := &Server{
-		cfg:           cfg,
-		store:         store,
-		log:           log,
-		relayID:       relayID,
-		registry:      NewRegistry(),
-		validators:    &ValidatorChain{},
-		hooks:         &HookChain{},
-		subs:          NewSubscriptionManager(cfg, log),
-		limiter:       NewLimiterHub(cfg),
-		ipOpen:        newIPConnTracker(),
-		metrics:       newRelayMetrics(),
-		metricsCtx:    mctx,
-		metricsCancel: mcancel,
+		cfg:            cfg,
+		trustedProxies: trustedProxies,
+		clientIPHeader: header,
+		store:          store,
+		log:            log,
+		relayID:        relayID,
+		registry:       NewRegistry(),
+		validators:     &ValidatorChain{},
+		hooks:          &HookChain{},
+		subs:           NewSubscriptionManager(cfg, log),
+		limiter:        NewLimiterHub(cfg),
+		ipOpen:         newIPConnTracker(),
+		metrics:        newRelayMetrics(),
+		metricsCtx:     mctx,
+		metricsCancel:  mcancel,
 	}
 	s.readQueue = newReaderQueue(s)
 	s.AppendPostHook("plugin_on_stored", func(ctx context.Context, env HookEnv) error {
@@ -314,7 +336,7 @@ func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if int(s.open.Load()) >= s.cfg.ConnectionLimits.MaxOpen {
+	if !s.reserveConnection() {
 		if s.metrics != nil {
 			s.metrics.IncRateLimitMaxConnections()
 		}
@@ -326,7 +348,14 @@ func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
-	peer := clientIP(r)
+	// Until ownership moves to serveWS, every failure releases this reservation.
+	accepted := false
+	defer func() {
+		if !accepted {
+			s.open.Add(-1)
+		}
+	}()
+	peer := s.clientIP(r)
 	if !s.limiter.AllowNewConnection(peer) {
 		if s.metrics != nil {
 			s.metrics.IncRateLimitNewConnections()
@@ -363,7 +392,7 @@ func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.open.Add(1)
+	accepted = true
 	s.connWG.Add(1)
 	go s.serveWS(nc, r, peer, useFlate)
 }
@@ -509,37 +538,61 @@ func parseClientIPHeader(v string) (string, bool) {
 	return "", false
 }
 
-func clientIP(r *http.Request) string {
-	// Cloudflare Tunnel and other Cloudflare-proxied HTTP traffic set this with the
-	// original visitor IP. Prefer it over X-Forwarded-For (Cloudflare recommendation).
-	if ip, ok := parseClientIPHeader(r.Header.Get("CF-Connecting-IP")); ok {
-		return ip
+// reserveConnection includes upgrades in progress in the global connection cap.
+func (s *Server) reserveConnection() bool {
+	for {
+		open := s.open.Load()
+		if open >= int64(s.cfg.ConnectionLimits.MaxOpen) {
+			return false
+		}
+		if s.open.CompareAndSwap(open, open+1) {
+			return true
+		}
 	}
+}
 
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first := strings.SplitN(xff, ",", 2)[0]
-		if ip, ok := parseClientIPHeader(first); ok {
+func (s *Server) trustedProxy(ip string) bool {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	for _, prefix := range s.trustedProxies {
+		if prefix.Contains(addr.Unmap()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	peer := peerIP(r.RemoteAddr)
+	if canonical, ok := parseClientIPHeader(peer); ok {
+		peer = canonical
+	}
+	if !s.trustedProxy(peer) {
+		return peer
+	}
+	if s.clientIPHeader != "X-Forwarded-For" {
+		// The selected proxy must overwrite this header, never preserve client input.
+		values := r.Header.Values(s.clientIPHeader)
+		if len(values) == 1 {
+			if ip, ok := parseClientIPHeader(values[0]); ok {
+				return ip
+			}
+		}
+		return peer
+	}
+	// Walk backwards to the first untrusted hop. Never use an attacker-supplied
+	// leftmost address beyond that boundary. Malformed chains fail closed.
+	chain := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	for i := len(chain) - 1; i >= 0; i-- {
+		ip, ok := parseClientIPHeader(chain[i])
+		if !ok {
+			return peer
+		}
+		if !s.trustedProxy(ip) {
 			return ip
 		}
 	}
-
-	if ip, ok := parseClientIPHeader(r.Header.Get("X-Real-IP")); ok {
-		return ip
-	}
-
-	if fwd := r.Header.Get("Forwarded"); fwd != "" {
-		for _, part := range strings.Split(fwd, ";") {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(part, "for=") {
-				ip := strings.TrimPrefix(part, "for=")
-				ip = strings.Trim(ip, "\" \t")
-				if parsed, ok := parseClientIPHeader(ip); ok {
-					return parsed
-				}
-				break
-			}
-		}
-	}
-
-	return peerIP(r.RemoteAddr)
+	return peer
 }
