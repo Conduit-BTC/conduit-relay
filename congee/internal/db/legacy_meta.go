@@ -37,15 +37,13 @@ func migrateLegacyMetaTurso(ctx context.Context, eventsDSN, metaPath string, met
 	if !sqlitewriter.HasLibsqlDriver() {
 		return errors.New("legacy meta: libsql driver not available")
 	}
-	sqldb, err := sql.Open("libsql", sqlitewriter.NormalizeLibsqlDSN(eventsDSN))
+	// Use the same busy timeout and bounded open retries as the event store.
+	// Reopening immediately after shutdown can overlap a libSQL lock release.
+	sqldb, db, err := sqlitewriter.OpenLibsqlHandles(ctx, eventsDSN, log)
 	if err != nil {
 		return fmt.Errorf("legacy meta: open events db: %w", err)
 	}
-	defer func() { _ = sqldb.Close() }()
-
-	if err := sqldb.PingContext(ctx); err != nil {
-		return fmt.Errorf("legacy meta: ping events db: %w", err)
-	}
+	defer func() { _ = db.Close() }()
 
 	var userVer int
 	if err := sqldb.QueryRowContext(ctx, "PRAGMA user_version").Scan(&userVer); err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michmich112/congee/internal/config"
 	"github.com/michmich112/congee/internal/storage"
@@ -53,6 +54,41 @@ func execLibsqlTest(t *testing.T, db *sql.DB, q string) {
 	var ignored string
 	if err := db.QueryRowContext(ctx, q).Scan(&ignored); err != nil && err != sql.ErrNoRows {
 		t.Fatalf("legacy ddl: %v", err)
+	}
+}
+
+func TestLegacyMetaMigrationWaitsForTransientDatabaseLock(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.db")
+	legacy := openLibsqlTestDB(t, eventsPath)
+	defer legacy.Close()
+	execLibsqlTest(t, legacy, `PRAGMA user_version = 8`)
+	execLibsqlTest(t, legacy, `BEGIN EXCLUSIVE`)
+	defer func() { _ = sqlitewriter.ExecSQL(ctx, legacy, `ROLLBACK`) }()
+
+	meta, err := sqlitemeta.Open(ctx, filepath.Join(dir, "meta.db"), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- migrateLegacyMetaTurso(ctx, eventsPath, "meta.db", meta, zerolog.Nop())
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("migration returned before the lock was released: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	execLibsqlTest(t, legacy, `COMMIT`)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("migration did not resume after the lock was released")
 	}
 }
 

@@ -33,7 +33,10 @@ func isLibsqlLocked(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "database is locked") || strings.Contains(s, "sqlite_busy")
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "database schema is locked") ||
+		strings.Contains(s, "database table is locked") ||
+		strings.Contains(s, "sqlite_busy") || strings.Contains(s, "sqlite_locked")
 }
 
 // OpenLibsqlHandles opens a local libSQL file, applies WAL pragmas, and returns sql.DB + bun.DB.
