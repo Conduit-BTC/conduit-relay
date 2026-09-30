@@ -171,6 +171,10 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 			if err := validateNIP17REQ(s.cfg, c, subFilters); err != nil {
 				return c.sendClosed(msg.SubID, err.Error())
 			}
+			if subscribeAuthRequired(s.cfg, subFilters) && !c.nip42HasAnyAuth() {
+				_ = nip42EnqueueAuthChallenge(c, s.cfg)
+				return c.sendClosed(msg.SubID, "auth-required: subscription requires authentication")
+			}
 			if err := s.subs.Add(c.ID, msg.SubID, subFilters); err != nil {
 				return sendREQAddError(c, msg.SubID, err, log)
 			}
@@ -190,6 +194,10 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 	if effective != msg {
 		if err := validateNIP17REQ(s.cfg, c, effective.Filters); err != nil {
 			return c.sendClosed(msg.SubID, err.Error())
+		}
+		if subscribeAuthRequired(s.cfg, effective.Filters) && !c.nip42HasAnyAuth() {
+			_ = nip42EnqueueAuthChallenge(c, s.cfg)
+			return c.sendClosed(msg.SubID, "auth-required: subscription requires authentication")
 		}
 	}
 

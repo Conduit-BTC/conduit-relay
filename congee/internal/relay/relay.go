@@ -482,6 +482,12 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 
 // Shutdown stops listening and closes active WebSocket connections.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Queue jobs use connection contexts. Cancel them before waiting for active
+	// storage work to finish, so a blocked query cannot hold up shutdown.
+	s.conns.Range(func(_, v any) bool {
+		v.(*Conn).initiateShutdown()
+		return true
+	})
 	if s.negQueue != nil {
 		s.negQueue.stop()
 	}
@@ -496,10 +502,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			return s.subs.TotalSubscriptions()
 		})
 	}
-	s.conns.Range(func(_, v any) bool {
-		v.(*Conn).initiateShutdown()
-		return true
-	})
 	return s.http.Shutdown(ctx)
 }
 
