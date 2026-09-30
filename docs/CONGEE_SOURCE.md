@@ -18,6 +18,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Startup and subscription hardening: initialize fresh PostgreSQL databases, preserve timestamp-tied query results, and isolate replacement subscription snapshots.
 - Runtime hardening: match subscriptions before visibility checks, release the subscription lock during storage reads, stop canceled snapshots before further visibility reads, and shut down after listener failure.
 - Import and group hardening: validate fetched upstream events against the sync filter, deliver imports to local subscriptions, and reject group writes when metadata lookup fails.
+- Reconciliation hardening: apply private-group read policy before disclosing event IDs, bound metadata loads, and cancel blocked lookups with the request.
+- Notification hardening: preserve PostgreSQL event notifications with backpressure and release blocked delivery during shutdown.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.

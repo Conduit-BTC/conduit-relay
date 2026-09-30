@@ -152,6 +152,9 @@ func (c *Conn) readLoopFlate() {
 	}
 }
 
+// readNextTextMessage reads one complete message. wsutil.Reader.Read joins
+// continuation frames and handles interleaved controls through OnIntermediate;
+// its EOF marks the final fragment, not the end of each individual frame.
 func readNextTextMessage(conn net.Conn, maxFrame int64) ([]byte, error) {
 	rd := wsutil.Reader{
 		Source:         conn,
@@ -218,6 +221,9 @@ func readOneFlateText(
 			continue
 		}
 		var payload bytes.Buffer
+		// Stream the complete message from wsutil.Reader into the decompressor.
+		// Reader joins continuation payloads and handles intermediate controls;
+		// compression and the aggregate size limit apply across all fragments.
 		src := io.Reader(rd)
 		if msg.IsCompressed() {
 			fr.Reset(src)

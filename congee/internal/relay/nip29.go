@@ -317,6 +317,10 @@ func nip29VisibilityLog(s *Server, connID string) zerolog.Logger {
 
 // EventVisibleToSubscription applies NIP-17 gift-wrap read rules and NIP-29 private-group read rules using NIP-42 authenticated pubkeys on the connection.
 func (s *Server) EventVisibleToSubscription(connID string, ev *nostr.Event) bool {
+	return s.eventVisibleToSubscription(context.Background(), connID, ev)
+}
+
+func (s *Server) eventVisibleToSubscription(ctx context.Context, connID string, ev *nostr.Event) bool {
 	if ev == nil {
 		return true
 	}
@@ -333,7 +337,7 @@ func (s *Server) EventVisibleToSubscription(connID string, ev *nostr.Event) bool
 	if h == "" {
 		return true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	md, err := s.store.GetLatestGroupMetadata39000(ctx, s.relayID.PubKeyHex(), h)
 	if err != nil {

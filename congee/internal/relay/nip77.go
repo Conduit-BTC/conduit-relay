@@ -178,7 +178,8 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 			return
 		}
 		if n > maxRec {
-			reason := fmt.Sprintf("blocked: this query is too big (%d records, max %d)", n, maxRec)
+			// The unfiltered count may include private group records.
+			reason := fmt.Sprintf("blocked: this query exceeds the maximum of %d records", maxRec)
 			fail(reason, true)
 			return
 		}
@@ -188,6 +189,12 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	items, err := s.store.QueryEventSyncItems(job.ctx, msg.Filter)
 	if err != nil {
 		log.Warn().Err(err).Str("sub_id", subID).Msg("nip77 sync query failed")
+		fail("error: query failed", false)
+		return
+	}
+	items, err = s.visibleNegSyncItems(job.ctx, c, msg.Filter, items)
+	if err != nil {
+		log.Warn().Err(err).Str("sub_id", subID).Msg("nip77 visibility query failed")
 		fail("error: query failed", false)
 		return
 	}
@@ -254,6 +261,59 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 		Detail:    fmt.Sprintf("conn_id=%s sub_id=%s record_count=%d filter_kinds=%s", c.ID, subID, len(items), negFilterKindsDetail(msg.Filter.Kinds)),
 	})
 
+}
+
+// Reconciliation must disclose only IDs the connection can read through REQ.
+// Load event metadata in bounded batches rather than retaining every payload.
+func (s *Server) visibleNegSyncItems(ctx context.Context, c *Conn, filter nostr.Filter, items []storage.SyncItem) ([]storage.SyncItem, error) {
+	if !nip29Enabled(s.cfg) || s.relayID == nil {
+		return items, nil
+	}
+	const batchSize = 256
+	visible := make([]storage.SyncItem, 0, len(items))
+	// Group policy is shared by all matching events in this reconciliation.
+	groupVisibility := make(map[string]bool)
+	for start := 0; start < len(items); start += batchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		batch := items[start:min(start+batchSize, len(items))]
+		ids := make([]string, len(batch))
+		for i, item := range batch {
+			ids[i] = item.ID
+		}
+		events, err := s.store.QueryEvents(ctx, []nostr.Filter{{IDs: ids}})
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[string]*nostr.Event, len(events))
+		for _, ev := range events {
+			if ev != nil {
+				byID[ev.ID] = ev
+			}
+		}
+		for _, item := range batch {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			ev := byID[item.ID]
+			if ev == nil || ev.CreatedAt != item.CreatedAt || !filter.Matches(ev) {
+				continue // Deleted or changed records cannot disclose stale IDs.
+			}
+			h := nostr.NIP29GroupHTag(ev)
+			allowed, checked := groupVisibility[h]
+			if h == "" || !checked {
+				allowed = s.eventVisibleToSubscription(ctx, c.ID, ev)
+				if h != "" {
+					groupVisibility[h] = allowed
+				}
+			}
+			if allowed {
+				visible = append(visible, item)
+			}
+		}
+	}
+	return visible, ctx.Err()
 }
 
 func (s *Server) scheduleNegIdle(c *Conn, sess *negSession) {

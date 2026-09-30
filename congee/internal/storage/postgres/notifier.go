@@ -116,11 +116,22 @@ func (n *Notifier) listenLoop(ctx context.Context) {
 			if p.Origin == n.origin || p.ID == "" {
 				continue
 			}
-			select {
-			case n.ch <- p.ID:
-			default:
+			if err := n.forwardEventID(ctx, p.ID); err != nil {
+				_ = conn.Close(ctx)
+				return
 			}
 		}
+	}
+}
+
+func (n *Notifier) forwardEventID(ctx context.Context, eventID string) error {
+	// Backpressure keeps imported events visible to live subscriptions. Shutdown
+	// must still unblock the listener when the consumer has stopped draining.
+	select {
+	case n.ch <- eventID:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
