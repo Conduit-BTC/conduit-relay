@@ -71,7 +71,9 @@ func (s *Server) handlePluginsInstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	_ = s.persistPluginConfigLocked(r, "install plugin")
+	if !s.savePluginConfig(w, r, "install plugin") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "manifest": man})
 }
 
@@ -117,7 +119,9 @@ func (s *Server) pluginToggle(w http.ResponseWriter, r *http.Request, enable boo
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	_ = s.persistPluginConfigLocked(r, "toggle plugin")
+	if !s.savePluginConfig(w, r, "toggle plugin") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -137,7 +141,9 @@ func (s *Server) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	_ = s.persistPluginConfigLocked(r, "uninstall plugin")
+	if !s.savePluginConfig(w, r, "uninstall plugin") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -177,7 +183,9 @@ func (s *Server) handlePluginPutSettings(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	_ = s.persistPluginConfigLocked(r, "plugin settings")
+	if !s.savePluginConfig(w, r, "plugin settings") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -249,7 +257,9 @@ func (s *Server) handlePluginPutInterceptLog(w http.ResponseWriter, r *http.Requ
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	limit := s.plugins.SetInterceptLogLimit(*body.Limit)
-	_ = s.persistPluginConfigLocked(r, "plugin intercept log size")
+	if !s.savePluginConfig(w, r, "plugin intercept log size") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "limit": limit})
 }
 
@@ -332,6 +342,17 @@ func (s *Server) servePluginUI(w http.ResponseWriter, r *http.Request, id, rel s
 	http.ServeFile(w, r, fp)
 }
 
+// The caller holds cfgMu. A failed save can follow an applied runtime change.
+func (s *Server) savePluginConfig(w http.ResponseWriter, r *http.Request, summary string) bool {
+	if err := s.persistPluginConfigLocked(r, summary); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "plugin change could not be persisted; runtime may have changed",
+		})
+		return false
+	}
+	return true
+}
+
 func (s *Server) persistPluginConfigLocked(r *http.Request, summary string) error {
 	if s.plugins == nil {
 		return nil
@@ -342,7 +363,10 @@ func (s *Server) persistPluginConfigLocked(r *http.Request, summary string) erro
 	if s.store == nil {
 		return nil
 	}
-	data, _ := json.Marshal(s.cfg)
+	data, err := json.Marshal(s.cfg)
+	if err != nil {
+		return err
+	}
 	return config.SaveConfigChange(r.Context(), s.store, summary, string(config.RedactSecretsForLog(data)))
 }
 
