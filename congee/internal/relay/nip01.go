@@ -174,29 +174,17 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 			if err := s.subs.Add(c.ID, msg.SubID, subFilters); err != nil {
 				return sendREQAddError(c, msg.SubID, err, log)
 			}
+			generation, _ := s.subs.SubGeneration(c.ID, msg.SubID)
 			c.noteSubscriptionCount(s.subs.SubCount(c.ID))
 			events, err := plugin.GetEventsByIDs(ctx, s.store, ires.EventIDs)
 			if err != nil {
 				log.Error().Err(err).Str("sub_id", msg.SubID).Msg("plugin respond hydrate failed")
-				return c.sendClosed(msg.SubID, "internal error")
+				return closeSnapshotOnQueryError(s, c, msg.SubID, generation)
 			}
-			for _, ev := range events {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if !s.EventVisibleToSubscription(c.ID, ev) {
-					continue
-				}
-				if err := c.sendEvent(msg.SubID, ev); err != nil {
-					log.Debug().Err(err).Str("sub_id", msg.SubID).Str("event_id", ev.ID).Msg("send event skipped")
-				}
+			if !sendSnapshotEvents(ctx, s, c, msg.SubID, generation, events) {
+				return nil
 			}
-			if err := c.sendEOSE(msg.SubID); err != nil {
-				return err
-			}
-			s.subs.NoteSubEOSE(c.ID, msg.SubID)
-			s.subs.FinishSnapshot(c.ID, msg.SubID)
-			return nil
+			return completeSnapshot(ctx, s, c, msg.SubID, generation)
 		}
 	}
 	if effective != msg {
@@ -225,6 +213,7 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 			return c.sendClosed(msg.SubID, err.Error())
 		}
 	}
+	generation, _ := s.subs.SubGeneration(c.ID, msg.SubID)
 	c.noteSubscriptionCount(s.subs.SubCount(c.ID))
 	if s.subs.SubCount(c.ID) > prevSubs {
 		log.Debug().
@@ -254,30 +243,19 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 			e.Str("sub_id", msg.SubID).Int("filter_count", len(msg.Filters)).Bool("search_enabled", searchEnabled).
 				Bool("filter_has_search", hasSearch).Int64("duration_ms", durationMs)
 		})
-		return c.sendClosed(msg.SubID, "internal error")
+		return closeSnapshotOnQueryError(s, c, msg.SubID, generation)
 	}
 	// NIP-17: REQ is not rejected upfront for filters that might return kind 1059; we query first.
 	// Gift wraps are withheld per connection via EventVisibleToSubscription unless NIP-42 AUTH matches a p tag.
-	for _, ev := range events {
-		if !s.EventVisibleToSubscription(c.ID, ev) {
-			continue
-		}
-		err := c.sendEvent(msg.SubID, ev)
-		if err != nil {
-			if errors.Is(err, ErrSlowConsumer) {
-				log.Warn().Err(err).Str("sub_id", msg.SubID).Str("event_id", ev.ID).Msg("send buffer full: initial event skipped")
-			} else {
-				log.Debug().Err(err).Str("sub_id", msg.SubID).Str("event_id", ev.ID).Msg("send event skipped")
-			}
-		}
-		s.subs.NoteSubInitialDelivery(c.ID, msg.SubID, err == nil)
+	if !sendSnapshotEvents(ctx, s, c, msg.SubID, generation, events) {
+		return nil
 	}
+
 	if hasMore {
-		openedUnix, _ := s.subs.SubOpenedUnix(c.ID, msg.SubID)
 		job := &reqPageJob{
 			connID:        c.ID,
 			subID:         msg.SubID,
-			openedUnix:    openedUnix,
+			generation:    generation,
 			state:         state,
 			searchEnabled: searchEnabled,
 			pageSize:      pageSize,
@@ -285,14 +263,11 @@ func handleREQ(ctx context.Context, s *Server, c *Conn, msg *nostr.ReqMessage, s
 		if s.readQueue != nil && s.readQueue.Enqueue(job) {
 			return nil
 		}
-		drainRemainingPages(ctx, s, c, msg.SubID, state, pageSize)
+		if !drainRemainingPages(ctx, s, c, msg.SubID, state, pageSize, generation) {
+			return nil
+		}
 	}
-	if err := c.sendEOSE(msg.SubID); err != nil {
-		return err
-	}
-	s.subs.NoteSubEOSE(c.ID, msg.SubID)
-	s.subs.FinishSnapshot(c.ID, msg.SubID)
-	return nil
+	return completeSnapshot(ctx, s, c, msg.SubID, generation)
 }
 
 func handleCLOSE(ctx context.Context, s *Server, c *Conn, msg *nostr.CloseMessage) {

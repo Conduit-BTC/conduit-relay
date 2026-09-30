@@ -186,6 +186,11 @@ func registerTestConn(t *testing.T, srv *Server, id string) *Conn {
 		log:    zerolog.Nop(),
 	}
 	srv.conns.Store(id, c)
+	srv.subs.mu.Lock()
+	if srv.subs.senders[id] == nil {
+		srv.subs.senders[id] = func(b []byte) bool { return c.enqueue(b) == nil }
+	}
+	srv.subs.mu.Unlock()
 	return c
 }
 

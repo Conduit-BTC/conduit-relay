@@ -29,6 +29,7 @@ type subEntry struct {
 	filters []nostr.Filter
 	closed  atomic.Bool
 
+	generation     uint64
 	openedUnix     int64
 	initialSent    atomic.Uint64
 	initialDropped atomic.Uint64
@@ -43,7 +44,8 @@ type subEntry struct {
 
 // SubscriptionManager tracks REQ subscriptions per connection and broadcasts events.
 type SubscriptionManager struct {
-	mu sync.RWMutex
+	mu             sync.RWMutex
+	nextGeneration uint64
 	// connID -> subID -> *subEntry
 	subs map[string]map[string]*subEntry
 	// connID -> enqueue outbound JSON
@@ -86,7 +88,8 @@ func (m *SubscriptionManager) UnregisterSender(connID string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(cmap))
-	for id := range cmap {
+	for id, entry := range cmap {
+		entry.closed.Store(true)
 		out = append(out, id)
 	}
 	return out
@@ -110,7 +113,12 @@ func (m *SubscriptionManager) Add(connID, subID string, filters []nostr.Filter) 
 	if _, exists := cmap[subID]; !exists && len(cmap) >= m.maxSubsPerConn {
 		return ErrTooManySubscriptions
 	}
+	if previous := cmap[subID]; previous != nil {
+		previous.closed.Store(true)
+	}
+	m.nextGeneration++
 	e := &subEntry{
+		generation: m.nextGeneration,
 		filters:    filters,
 		openedUnix: time.Now().Unix(),
 	}
@@ -121,17 +129,16 @@ func (m *SubscriptionManager) Add(connID, subID string, filters []nostr.Filter) 
 
 // Remove drops one subscription.
 func (m *SubscriptionManager) Remove(connID, subID string) {
-	m.mu.RLock()
-	if cmap, ok := m.subs[connID]; ok {
-		if entry, ok := cmap[subID]; ok {
-			entry.closed.Store(true)
-		}
-	}
-	m.mu.RUnlock()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.removeLocked(connID, subID)
+}
+
+func (m *SubscriptionManager) removeLocked(connID, subID string) {
 	if cmap := m.subs[connID]; cmap != nil {
+		if entry := cmap[subID]; entry != nil {
+			entry.closed.Store(true)
+		}
 		delete(cmap, subID)
 		if len(cmap) == 0 {
 			delete(m.subs, connID)
@@ -163,50 +170,70 @@ func filtersMatch(filters []nostr.Filter, ev *nostr.Event) bool {
 // Broadcast delivers EVENT to every matching subscription.
 // If visible is nil, all connections receive matching events. Otherwise visible(connID, ev) must be true.
 func (m *SubscriptionManager) Broadcast(ev *nostr.Event, visible func(connID string, ev *nostr.Event) bool) {
-	if visible == nil {
-		visible = func(string, *nostr.Event) bool { return true }
+	// Match first, then perform potentially expensive visibility checks without the
+	// manager lock. Entry identity prevents delivery to a replacement subscription.
+	type match struct {
+		subID string
+		entry *subEntry
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	matches := make(map[string][]match)
+	m.mu.RLock()
 	for connID, cmap := range m.subs {
-		send := m.senders[connID]
-		if send == nil {
-			continue
-		}
-		if !visible(connID, ev) {
+		if m.senders[connID] == nil {
 			continue
 		}
 		for subID, entry := range cmap {
-			if entry.closed.Load() {
-				continue
+			if !entry.closed.Load() && filtersMatch(entry.filters, ev) {
+				matches[connID] = append(matches[connID], match{subID, entry})
 			}
-			if !filtersMatch(entry.filters, ev) {
-				continue
-			}
-			b, err := nostr.MarshalRelayEvent(subID, ev)
+		}
+	}
+	m.mu.RUnlock()
+	for connID, subs := range matches {
+		if visible != nil && !visible(connID, ev) {
+			continue
+		}
+		for _, sub := range subs {
+			b, err := nostr.MarshalRelayEvent(sub.subID, ev)
 			if err != nil {
-				m.relayLog.Error().Err(err).Str("conn_id", connID).Str("sub_id", subID).
+				m.relayLog.Error().Err(err).Str("conn_id", connID).Str("sub_id", sub.subID).
 					Str("event_id", ev.ID).Int("kind", ev.Kind).Msg("broadcast marshal relay event failed")
+				continue
+			}
+			m.mu.Lock()
+			entry := m.subs[connID][sub.subID]
+			send := m.senders[connID]
+			if entry != sub.entry || entry.closed.Load() || send == nil {
+				m.mu.Unlock()
 				continue
 			}
 			if !entry.snapshotDone.Load() {
 				if len(entry.pendingLive) >= pendingLiveCap {
 					entry.overflow.Store(true)
-					continue
+				} else {
+					entry.pendingLive = append(entry.pendingLive, b)
 				}
-				entry.pendingLive = append(entry.pendingLive, b)
-				continue
-			}
-			ok := send(b)
-			if ok {
+			} else if send(b) {
 				entry.broadcastOk.Add(1)
 			} else {
 				entry.broadcastDrop.Add(1)
-				m.relayLog.Debug().Str("conn_id", connID).Str("sub_id", subID).
+				m.relayLog.Debug().Str("conn_id", connID).Str("sub_id", sub.subID).
 					Str("event_id", ev.ID).Msg("broadcast send queue full or closed")
 			}
+			m.mu.Unlock()
 		}
 	}
+}
+
+// SubGeneration identifies one subscription instance, including replacements in the same second.
+func (m *SubscriptionManager) SubGeneration(connID, subID string) (uint64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e := m.subs[connID][subID]
+	if e == nil || e.closed.Load() {
+		return 0, false
+	}
+	return e.generation, true
 }
 
 // SubOpenedUnix returns the opened_unix stamp for an active subscription.
@@ -224,8 +251,8 @@ func (m *SubscriptionManager) SubOpenedUnix(connID, subID string) (int64, bool) 
 	return e.openedUnix, true
 }
 
-// IsSameSnapshot reports whether connID/subID is still the subscription opened at openedUnix.
-func (m *SubscriptionManager) IsSameSnapshot(connID, subID string, openedUnix int64) bool {
+// IsSameSnapshot reports whether connID/subID is still the same subscription generation.
+func (m *SubscriptionManager) IsSameSnapshot(connID, subID string, generation uint64) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.senders[connID] == nil {
@@ -239,7 +266,20 @@ func (m *SubscriptionManager) IsSameSnapshot(connID, subID string, openedUnix in
 	if e == nil || e.closed.Load() {
 		return false
 	}
-	return e.openedUnix == openedUnix
+	return e.generation == generation
+}
+
+// withSnapshot serializes a bounded enqueue or completion with subscription replacement.
+// The callback must not block or perform storage work.
+func (m *SubscriptionManager) withSnapshot(connID, subID string, generation uint64, fn func(*subEntry)) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.subs[connID][subID]
+	if e == nil || e.closed.Load() || e.generation != generation || m.senders[connID] == nil {
+		return false
+	}
+	fn(e)
+	return true
 }
 
 // IsOpen reports whether connID/subID is an active subscription with a registered sender.
@@ -288,48 +328,31 @@ func (m *SubscriptionManager) NoteSubInitialDelivery(connID, subID string, ok bo
 
 // FinishSnapshot marks the initial REQ snapshot complete and flushes buffered live events.
 func (m *SubscriptionManager) FinishSnapshot(connID, subID string) {
-	var pending [][]byte
-	var overflow bool
-	var send func([]byte) bool
-
 	m.mu.Lock()
-	cmap := m.subs[connID]
-	if cmap != nil {
-		if e := cmap[subID]; e != nil {
-			e.snapshotDone.Store(true)
-			pending = e.pendingLive
-			e.pendingLive = nil
-			overflow = e.overflow.Load()
-			send = m.senders[connID]
-		}
+	defer m.mu.Unlock()
+	if e := m.subs[connID][subID]; e != nil && !e.closed.Load() {
+		m.finishSnapshotLocked(connID, subID, e)
 	}
-	m.mu.Unlock()
+}
 
-	if overflow {
+func (m *SubscriptionManager) finishSnapshotLocked(connID, subID string, e *subEntry) {
+	e.snapshotDone.Store(true)
+	pending := e.pendingLive
+	e.pendingLive = nil
+	if e.overflow.Load() {
 		m.relayLog.Warn().Str("conn_id", connID).Str("sub_id", subID).
 			Int("cap", pendingLiveCap).
 			Msg("live events dropped during REQ snapshot: pending buffer overflow")
 	}
+	send := m.senders[connID]
 	if send == nil {
 		return
 	}
 	for _, b := range pending {
 		if send(b) {
-			m.mu.RLock()
-			if cmap := m.subs[connID]; cmap != nil {
-				if e := cmap[subID]; e != nil {
-					e.broadcastOk.Add(1)
-				}
-			}
-			m.mu.RUnlock()
+			e.broadcastOk.Add(1)
 		} else {
-			m.mu.RLock()
-			if cmap := m.subs[connID]; cmap != nil {
-				if e := cmap[subID]; e != nil {
-					e.broadcastDrop.Add(1)
-				}
-			}
-			m.mu.RUnlock()
+			e.broadcastDrop.Add(1)
 			m.relayLog.Debug().Str("conn_id", connID).Str("sub_id", subID).
 				Msg("buffered live event send queue full or closed")
 		}

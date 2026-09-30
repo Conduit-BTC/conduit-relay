@@ -677,3 +677,70 @@ func TestFetchREQPage_ZeroPageSizeIsSingleQuery(t *testing.T) {
 		t.Fatalf("want 3 events (default limit), got %d", len(evs))
 	}
 }
+
+func TestFetchREQPage_TimestampTiesPreserveBoundsAndLimits(t *testing.T) {
+	ctx := context.Background()
+	st, closeStore, err := db.OpenTestStore(ctx, filepath.Join(t.TempDir(), "ties.db"), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore()
+	for i := 1; i <= 132; i++ {
+		created := int64(5)
+		if i > 130 {
+			created = int64(i - 131)
+		} // Includes timestamp zero.
+		ev := &nostr.Event{ID: fmt.Sprintf("%064x", i), PubKey: strings.Repeat("b", 64),
+			CreatedAt: created, Kind: 1, Content: "tie", Sig: strings.Repeat("f", 128)}
+		if err := st.SaveEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SaveEvent(ctx, &nostr.Event{ID: strings.Repeat("a", 64), PubKey: strings.Repeat("b", 64),
+		CreatedAt: 6, Kind: 1, Content: "outside until", Sig: strings.Repeat("f", 128)}); err != nil {
+		t.Fatal(err)
+	}
+	since, until := int64(0), int64(5)
+	for _, budget := range []int{0, 17} {
+		t.Run(fmt.Sprintf("budget_%d", budget), func(t *testing.T) {
+			f := nostr.Filter{Kinds: []int{1}, Since: &since, Until: &until, Limit: &budget}
+			// Overlapping filters must preserve cursor progress and deduplicate results.
+			state := newREQQueryState([]nostr.Filter{f, f}, 0, false)
+			var got []*nostr.Event
+			for page := 0; ; page++ {
+				if page > 30 {
+					t.Fatal("cursor did not terminate")
+				}
+				evs, more, err := fetchREQPage(ctx, st, state, 7)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, evs...)
+				if !more {
+					break
+				}
+			}
+			want := 132
+			if budget > 0 {
+				want = budget
+			}
+			if len(got) != want {
+				t.Fatalf("got %d, want %d", len(got), want)
+			}
+			seen := make(map[string]bool)
+			for i, ev := range got {
+				if ev.CreatedAt > until || ev.CreatedAt < since || seen[ev.ID] {
+					t.Fatalf("invalid result at %d", i)
+				}
+				seen[ev.ID] = true
+				if i > 0 && (got[i-1].CreatedAt < ev.CreatedAt ||
+					(got[i-1].CreatedAt == ev.CreatedAt && got[i-1].ID >= ev.ID)) {
+					t.Fatalf("incorrect order at %d", i)
+				}
+			}
+			if budget > 0 && got[len(got)-1].ID != fmt.Sprintf("%064x", budget) {
+				t.Fatal("limit did not retain lowest IDs")
+			}
+		})
+	}
+}

@@ -264,9 +264,21 @@ func migrateLegacyMetaPostgres(ctx context.Context, eventsDSN, metaPath string, 
 	if err := sqldb.PingContext(ctx); err != nil {
 		return fmt.Errorf("legacy meta: ping postgres: %w", err)
 	}
+	return copyLegacyMetaPostgres(ctx, sqldb, metaPath, meta, log)
+}
+
+func copyLegacyMetaPostgres(ctx context.Context, sqldb *sql.DB, metaPath string, meta *sqlitemeta.Store, log zerolog.Logger) error {
+	exists, err := legacyTableExists(ctx, sqldb, "congee_schema_version", true)
+	if err != nil {
+		return fmt.Errorf("legacy meta: check postgres schema version table: %w", err)
+	}
+	// A fresh database has no legacy metadata. The event store creates its schema next.
+	if !exists {
+		return nil
+	}
 
 	var version int
-	err := sqldb.QueryRowContext(ctx, `SELECT version FROM congee_schema_version WHERE id = 1`).Scan(&version)
+	err = sqldb.QueryRowContext(ctx, `SELECT version FROM congee_schema_version WHERE id = 1`).Scan(&version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil

@@ -142,9 +142,12 @@ func main() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sig)
 
 	doRestart := false
 	select {
+	case <-ctx.Done():
+		log.Info().Msg("listener failure shutdown")
 	case <-sig:
 		log.Info().Msg("shutdown signal")
 	case <-restartCh:

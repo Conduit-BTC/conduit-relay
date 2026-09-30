@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/michmich112/congee/internal/nostr"
 )
 
 const (
@@ -17,7 +19,7 @@ const (
 type reqPageJob struct {
 	connID        string
 	subID         string
-	openedUnix    int64
+	generation    uint64
 	state         *reqQueryState
 	searchEnabled bool
 	pageSize      int
@@ -95,7 +97,7 @@ func (q *ReaderQueue) runJob(job *reqPageJob) {
 		return
 	}
 	c := v.(*Conn)
-	if !s.subs.IsSameSnapshot(job.connID, job.subID, job.openedUnix) {
+	if !s.subs.IsSameSnapshot(job.connID, job.subID, job.generation) {
 		return
 	}
 
@@ -111,51 +113,100 @@ func (q *ReaderQueue) runJob(job *reqPageJob) {
 		LogStoreErr(log, zerolog.ErrorLevel, "REQ.QueryPage", err, "req page query failed", func(e *zerolog.Event) {
 			e.Str("sub_id", job.subID)
 		})
-		q.closeSubOnQueryError(c, job.connID, job.subID)
+		closeSnapshotOnQueryError(s, c, job.subID, job.generation)
 		return
 	}
 
-	for _, ev := range events {
-		if !s.EventVisibleToSubscription(job.connID, ev) {
-			continue
-		}
-		sendErr := c.sendEvent(job.subID, ev)
-		if sendErr != nil {
-			if errors.Is(sendErr, ErrSlowConsumer) {
-				log := relayLogger(c, q.ctx)
-				log.Warn().Err(sendErr).Str("sub_id", job.subID).Str("event_id", ev.ID).Msg("send buffer full: initial event skipped")
-			}
-		}
-		s.subs.NoteSubInitialDelivery(job.connID, job.subID, sendErr == nil)
+	if !sendSnapshotEvents(q.ctx, s, c, job.subID, job.generation, events) {
+		return
 	}
 
 	if hasMore {
 		if q.Enqueue(job) {
 			return
 		}
-		drainRemainingPages(q.ctx, s, c, job.subID, job.state, job.pageSize)
+		if !drainRemainingPages(q.ctx, s, c, job.subID, job.state, job.pageSize, job.generation) {
+			return
+		}
 	}
 
-	if err := c.sendEOSE(job.subID); err != nil {
-		return
+	completeSnapshot(q.ctx, s, c, job.subID, job.generation)
+}
+
+// sendSnapshotEvents checks visibility outside the manager lock, then atomically
+// checks the generation and enqueues. A replacement invalidates the entire old job.
+func sendSnapshotEvents(ctx context.Context, s *Server, c *Conn, subID string, generation uint64, events []*nostr.Event) bool {
+	if snapshotCanceled(ctx, c) || !s.subs.IsSameSnapshot(c.ID, subID, generation) {
+		return false
 	}
-	s.subs.NoteSubEOSE(job.connID, job.subID)
-	s.subs.FinishSnapshot(job.connID, job.subID)
+	for _, ev := range events {
+		if snapshotCanceled(ctx, c) {
+			return false
+		}
+		if !s.EventVisibleToSubscription(c.ID, ev) {
+			continue
+		}
+		var sendErr error
+		if !s.subs.withSnapshot(c.ID, subID, generation, func(e *subEntry) {
+			if snapshotCanceled(ctx, c) {
+				return
+			}
+			sendErr = c.sendEvent(subID, ev)
+			if sendErr == nil {
+				e.initialSent.Add(1)
+			} else {
+				e.initialDropped.Add(1)
+			}
+		}) {
+			return false
+		}
+		if errors.Is(sendErr, ErrSlowConsumer) {
+			log := relayLogger(c, ctx)
+			log.Warn().Err(sendErr).Str("sub_id", subID).Str("event_id", ev.ID).Msg("send buffer full: initial event skipped")
+		}
+	}
+	return !snapshotCanceled(ctx, c) && s.subs.IsSameSnapshot(c.ID, subID, generation)
 }
 
-func (q *ReaderQueue) closeSubOnQueryError(c *Conn, connID, subID string) {
-	closeSubOnQueryError(q.srv, c, connID, subID)
+func snapshotCanceled(ctx context.Context, c *Conn) bool {
+	return ctx.Err() != nil || (c.ctx != nil && c.ctx.Err() != nil)
 }
 
-func closeSubOnQueryError(s *Server, c *Conn, connID, subID string) {
-	_ = c.sendClosed(subID, "internal error")
-	s.subs.Remove(connID, subID)
-	s.subs.FinishSnapshot(connID, subID)
+func completeSnapshot(ctx context.Context, s *Server, c *Conn, subID string, generation uint64) error {
+	var sendErr error
+	s.subs.withSnapshot(c.ID, subID, generation, func(e *subEntry) {
+		if ctx.Err() != nil {
+			sendErr = ctx.Err()
+			return
+		}
+		if c.ctx != nil && c.ctx.Err() != nil {
+			sendErr = c.ctx.Err()
+			return
+		}
+		sendErr = c.sendEOSE(subID)
+		if sendErr == nil {
+			e.eoseSent.Add(1)
+			s.subs.finishSnapshotLocked(c.ID, subID, e)
+		}
+	})
+	return sendErr
+}
+
+func closeSnapshotOnQueryError(s *Server, c *Conn, subID string, generation uint64) error {
+	var sendErr error
+	s.subs.withSnapshot(c.ID, subID, generation, func(*subEntry) {
+		sendErr = c.sendClosed(subID, "internal error")
+		s.subs.removeLocked(c.ID, subID)
+	})
+	return sendErr
 }
 
 // drainRemainingPages fetches and sends all remaining REQ pages synchronously.
-func drainRemainingPages(ctx context.Context, s *Server, c *Conn, subID string, state *reqQueryState, pageSize int) {
+func drainRemainingPages(ctx context.Context, s *Server, c *Conn, subID string, state *reqQueryState, pageSize int, generation uint64) bool {
 	for {
+		if !s.subs.IsSameSnapshot(c.ID, subID, generation) {
+			return false
+		}
 		qctx, cancel := context.WithTimeout(ctx, readerPageTimeout)
 		t0 := time.Now()
 		events, hasMore, err := fetchREQPage(qctx, s.store, state, pageSize)
@@ -168,22 +219,15 @@ func drainRemainingPages(ctx context.Context, s *Server, c *Conn, subID string, 
 			LogStoreErr(log, zerolog.ErrorLevel, "REQ.QueryPage", err, "req page query failed", func(e *zerolog.Event) {
 				e.Str("sub_id", subID)
 			})
-			closeSubOnQueryError(s, c, c.ID, subID)
-			return
+			closeSnapshotOnQueryError(s, c, subID, generation)
+			return false
 		}
-		for _, ev := range events {
-			if !s.EventVisibleToSubscription(c.ID, ev) {
-				continue
-			}
-			sendErr := c.sendEvent(subID, ev)
-			if sendErr != nil && errors.Is(sendErr, ErrSlowConsumer) {
-				log := relayLogger(c, ctx)
-				log.Warn().Err(sendErr).Str("sub_id", subID).Str("event_id", ev.ID).Msg("send buffer full: initial event skipped")
-			}
-			s.subs.NoteSubInitialDelivery(c.ID, subID, sendErr == nil)
+		if !sendSnapshotEvents(ctx, s, c, subID, generation, events) {
+			return false
 		}
+
 		if !hasMore {
-			break
+			return true
 		}
 	}
 }

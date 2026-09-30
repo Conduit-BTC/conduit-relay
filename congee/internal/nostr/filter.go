@@ -7,14 +7,22 @@ import (
 	"unicode"
 )
 
+// QueryCursor continues the internal created_at DESC, id ASC query order.
+// It is not part of the Nostr filter wire format.
+type QueryCursor struct {
+	CreatedAt int64
+	ID        string
+}
+
 // Filter is a NIP-01 subscription / query filter.
 type Filter struct {
-	IDs     []string `json:"ids,omitempty"`
-	Authors []string `json:"authors,omitempty"`
-	Kinds   []int    `json:"kinds,omitempty"`
-	Since   *int64   `json:"since,omitempty"`
-	Until   *int64   `json:"until,omitempty"`
-	Limit   *int     `json:"limit,omitempty"`
+	Cursor  *QueryCursor `json:"-"`
+	IDs     []string     `json:"ids,omitempty"`
+	Authors []string     `json:"authors,omitempty"`
+	Kinds   []int        `json:"kinds,omitempty"`
+	Since   *int64       `json:"since,omitempty"`
+	Until   *int64       `json:"until,omitempty"`
+	Limit   *int         `json:"limit,omitempty"`
 	// Search is NIP-50 full-text query text. When set to a non-empty trimmed string,
 	// historical REQ results are produced via SearchEvents; Matches ignores it (see Matches).
 	Search *string `json:"search,omitempty"`
@@ -187,6 +195,10 @@ func (f *Filter) Matches(e *Event) bool {
 		return false
 	}
 	if f.Until != nil && e.CreatedAt > *f.Until {
+		return false
+	}
+	if f.Cursor != nil && (e.CreatedAt > f.Cursor.CreatedAt ||
+		(e.CreatedAt == f.Cursor.CreatedAt && e.ID <= f.Cursor.ID)) {
 		return false
 	}
 	for key, wantVals := range f.Tag {

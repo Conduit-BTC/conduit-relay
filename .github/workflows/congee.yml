@@ -21,6 +21,20 @@ jobs:
     timeout-minutes: 25
     env:
       CGO_ENABLED: "1"
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: congee_ci
+          POSTGRES_PASSWORD: congee_ci
+          POSTGRES_DB: congee_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U congee_ci -d congee_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: congee
@@ -39,6 +53,20 @@ jobs:
       - run: go vet ./...
       - run: go test -count=1 ./...
       - run: go test -race -count=1 ./...
+      - name: Test isolated PostgreSQL startup and migration rollback
+        env:
+          TEST_POSTGRES_DSN: postgres://congee_ci:congee_ci@127.0.0.1:5432/congee_ci?sslmode=disable
+        run: >-
+          go test -v -count=1
+          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion)$'
+          ./internal/db ./internal/storage/postgres
+      - name: Race-check isolated PostgreSQL startup and migration rollback
+        env:
+          TEST_POSTGRES_DSN: postgres://congee_ci:congee_ci@127.0.0.1:5432/congee_ci?sslmode=disable
+        run: >-
+          go test -v -race -count=1
+          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion)$'
+          ./internal/db ./internal/storage/postgres
       - name: Test plugin SDK
         working-directory: congee/sdk/plugin
         run: go test -race -count=1 ./...

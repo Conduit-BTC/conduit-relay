@@ -39,8 +39,8 @@ func applyDefaultQueryLimit(filters []nostr.Filter, defaultLimit int) []nostr.Fi
 
 type filterCursor struct {
 	base      nostr.Filter
-	until     *int64 // nil on first page; then oldest_created_at-1
-	remaining int    // budget; <=0 means unlimited (default_query_limit=0 or client limit<=0)
+	cursor    *nostr.QueryCursor // exclusive last event in created_at DESC, id ASC order
+	remaining int                // budget; <=0 means unlimited (default_query_limit=0 or client limit<=0)
 	exhausted bool
 }
 
@@ -141,7 +141,7 @@ func fetchREQAll(ctx context.Context, store storage.Store, st *reqQueryState) ([
 
 // fetchREQPage loads one page of initial REQ snapshot events (OR across filters).
 // When pageSize <= 0, all matching events are returned in a single page (legacy behavior).
-// Search filters run once on the first page only; non-search filters paginate via until cursors.
+// Search filters run once on the first page only; non-search filters paginate via timestamp/ID cursors.
 func fetchREQPage(ctx context.Context, store storage.Store, st *reqQueryState, pageSize int) ([]*nostr.Event, bool, error) {
 	if pageSize <= 0 {
 		return fetchREQAll(ctx, store, st)
@@ -179,9 +179,7 @@ func fetchREQPage(ctx context.Context, store storage.Store, st *reqQueryState, p
 		}
 		queryF := fc.base
 		queryF.Limit = &lim
-		if fc.until != nil {
-			queryF.Until = fc.until
-		}
+		queryF.Cursor = fc.cursor
 		evs, err := store.QueryEvents(ctx, []nostr.Filter{queryF})
 		if err != nil {
 			return nil, false, err
@@ -190,9 +188,8 @@ func fetchREQPage(ctx context.Context, store storage.Store, st *reqQueryState, p
 			pageByID[ev.ID] = ev
 		}
 		if len(evs) > 0 {
-			oldest := evs[len(evs)-1].CreatedAt
-			u := oldest - 1
-			fc.until = &u
+			last := evs[len(evs)-1]
+			fc.cursor = &nostr.QueryCursor{CreatedAt: last.CreatedAt, ID: last.ID}
 		}
 		if fc.remaining > 0 {
 			fc.remaining -= len(evs)

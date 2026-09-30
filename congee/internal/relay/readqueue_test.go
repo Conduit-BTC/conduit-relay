@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,9 +94,9 @@ func TestReaderQueueDrainsPagesThenEOSE(t *testing.T) {
 	if err := srv.subs.Add(connID, "sub1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	openedUnix, ok := srv.subs.SubOpenedUnix(connID, "sub1")
+	generation, ok := srv.subs.SubGeneration(connID, "sub1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 
 	state := newREQQueryState([]nostr.Filter{{Kinds: []int{1}}}, 0, false)
@@ -107,7 +108,7 @@ func TestReaderQueueDrainsPagesThenEOSE(t *testing.T) {
 	job := &reqPageJob{
 		connID:     connID,
 		subID:      "sub1",
-		openedUnix: openedUnix,
+		generation: generation,
 		state:      state,
 		pageSize:   pageSize,
 	}
@@ -196,9 +197,9 @@ func TestReaderQueueDropsJobWhenSubClosed(t *testing.T) {
 	if err := srv.subs.Add(connID, "sub1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	openedUnix, ok := srv.subs.SubOpenedUnix(connID, "sub1")
+	generation, ok := srv.subs.SubGeneration(connID, "sub1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 
 	state := newREQQueryState([]nostr.Filter{{Kinds: []int{1}}}, 0, false)
@@ -222,7 +223,7 @@ func TestReaderQueueDropsJobWhenSubClosed(t *testing.T) {
 		srv.readQueue.runJob(&reqPageJob{
 			connID:     connID,
 			subID:      "sub1",
-			openedUnix: openedUnix,
+			generation: generation,
 			state:      state,
 			pageSize:   pageSize,
 		})
@@ -285,7 +286,8 @@ func TestDrainRemainingPagesSyncFallback(t *testing.T) {
 		t.Fatalf("setup: hasMore=%v err=%v", hasMore, err)
 	}
 
-	drainRemainingPages(ctx, srv, c, "sub1", state, 2)
+	generation, _ := srv.subs.SubGeneration(connID, "sub1")
+	drainRemainingPages(ctx, srv, c, "sub1", state, 2, generation)
 
 	eventCount := 0
 	for {
@@ -364,9 +366,9 @@ func TestReaderQueueDropsStaleJobOnSubReplacement(t *testing.T) {
 	if err := srv.subs.Add(connID, "sub1", filters); err != nil {
 		t.Fatal(err)
 	}
-	staleOpened, ok := srv.subs.SubOpenedUnix(connID, "sub1")
+	staleOpened, ok := srv.subs.SubGeneration(connID, "sub1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 
 	state := newREQQueryState(filters, 0, false)
@@ -375,18 +377,17 @@ func TestReaderQueueDropsStaleJobOnSubReplacement(t *testing.T) {
 		t.Fatalf("setup page1: hasMore=%v err=%v", hasMore, err)
 	}
 
-	time.Sleep(1100 * time.Millisecond)
 	if err := srv.subs.Add(connID, "sub1", filters); err != nil {
 		t.Fatal(err)
 	}
 	if srv.subs.IsSameSnapshot(connID, "sub1", staleOpened) {
-		t.Fatal("expected replacement to change opened_unix")
+		t.Fatal("expected replacement to change generation")
 	}
 
 	srv.readQueue.runJob(&reqPageJob{
 		connID:     connID,
 		subID:      "sub1",
-		openedUnix: staleOpened,
+		generation: staleOpened,
 		state:      state,
 		pageSize:   pageSize,
 	})
@@ -442,9 +443,9 @@ func TestReaderQueueQueryErrorSendsClosed(t *testing.T) {
 	if err := srv.subs.Add(connID, "sub1", filters); err != nil {
 		t.Fatal(err)
 	}
-	openedUnix, ok := srv.subs.SubOpenedUnix(connID, "sub1")
+	generation, ok := srv.subs.SubGeneration(connID, "sub1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 
 	state := newREQQueryState(filters, 0, false)
@@ -457,7 +458,7 @@ func TestReaderQueueQueryErrorSendsClosed(t *testing.T) {
 	srv.readQueue.runJob(&reqPageJob{
 		connID:     connID,
 		subID:      "sub1",
-		openedUnix: openedUnix,
+		generation: generation,
 		state:      state,
 		pageSize:   pageSize,
 	})
@@ -541,9 +542,9 @@ func TestReaderQueueDropsJobOnDisconnect(t *testing.T) {
 	if err := srv.subs.Add(connID, "sub1", filters); err != nil {
 		t.Fatal(err)
 	}
-	openedUnix, ok := srv.subs.SubOpenedUnix(connID, "sub1")
+	generation, ok := srv.subs.SubGeneration(connID, "sub1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 
 	state := newREQQueryState(filters, 0, false)
@@ -564,7 +565,7 @@ func TestReaderQueueDropsJobOnDisconnect(t *testing.T) {
 		srv.readQueue.runJob(&reqPageJob{
 			connID:     connID,
 			subID:      "sub1",
-			openedUnix: openedUnix,
+			generation: generation,
 			state:      state,
 			pageSize:   pageSize,
 		})
@@ -576,5 +577,166 @@ func TestReaderQueueDropsJobOnDisconnect(t *testing.T) {
 	case <-recv:
 		t.Fatal("expected no delivery after disconnect")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// blockedREQStore lets a replacement arrive while the old job is inside storage.
+type blockedREQStore struct {
+	storage.Store
+	entered chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (s *blockedREQStore) QueryEvents(ctx context.Context, filters []nostr.Filter) ([]*nostr.Event, error) {
+	close(s.entered)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.QueryEvents(ctx, filters)
+}
+
+func TestREQSnapshotReplacementDuringQuery(t *testing.T) {
+	for _, initial := range []bool{false, true} {
+		for _, queryError := range []bool{false, true} {
+			t.Run(fmt.Sprintf("initial_%v_error_%v", initial, queryError), func(t *testing.T) {
+				ctx := context.Background()
+				st, closeStore, err := db.OpenTestStore(ctx, filepath.Join(t.TempDir(), "inflight.db"), zerolog.Nop())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer closeStore()
+				createTestEvents(t, st, ctx, 3)
+				blocked := &blockedREQStore{Store: st, entered: make(chan struct{}), release: make(chan struct{})}
+				if queryError {
+					blocked.err = errors.New("query failed")
+				}
+				srv, err := NewServer(testRelayConfig(), blocked, zerolog.Nop(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recv := make(chan []byte, 16)
+				c := &Conn{ID: "inflight", server: srv, send: recv, ctx: ctx, log: zerolog.Nop()}
+				srv.conns.Store(c.ID, c)
+				srv.subs.RegisterSender(c.ID, func(b []byte) bool { return c.enqueue(b) == nil })
+				filters := []nostr.Filter{{Kinds: []int{1}}}
+				if err := srv.subs.Add(c.ID, "sub", filters); err != nil {
+					t.Fatal(err)
+				}
+				generation, _ := srv.subs.SubGeneration(c.ID, "sub")
+				openedUnix, _ := srv.subs.SubOpenedUnix(c.ID, "sub")
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					if initial {
+						if err := handleREQ(ctx, srv, c, &nostr.ReqMessage{SubID: "sub", Filters: filters}, false); err != nil {
+							t.Errorf("initial query: %v", err)
+						}
+					} else {
+						srv.readQueue.runJob(&reqPageJob{connID: c.ID, subID: "sub", generation: generation,
+							state: newREQQueryState(filters, 0, false), pageSize: 10})
+					}
+				}()
+				select {
+				case <-blocked.entered:
+				case <-time.After(time.Second):
+					close(blocked.release)
+					<-done
+					t.Fatal("old query did not start")
+				}
+				if err := srv.subs.Add(c.ID, "sub", filters); err != nil {
+					t.Fatal(err)
+				}
+				// Keep audit timestamps identical to prove they do not identify generations.
+				srv.subs.mu.Lock()
+				srv.subs.subs[c.ID]["sub"].openedUnix = openedUnix
+				srv.subs.mu.Unlock()
+				close(blocked.release)
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("old query did not finish")
+				}
+				select {
+				case message := <-recv:
+					t.Fatalf("old job emitted EVENT/EOSE/CLOSED: %s", message)
+				default:
+				}
+				if !srv.subs.IsOpen(c.ID, "sub") {
+					t.Fatal("old query closed replacement")
+				}
+				srv.subs.mu.RLock()
+				entry := srv.subs.subs[c.ID]["sub"]
+				completed := entry.snapshotDone.Load()
+				sent, eose := entry.initialSent.Load(), entry.eoseSent.Load()
+				srv.subs.mu.RUnlock()
+				if completed || sent != 0 || eose != 0 {
+					t.Fatal("old job changed replacement state")
+				}
+			})
+		}
+	}
+}
+
+// cancelingVisibilityStore cancels a snapshot during its first metadata lookup.
+type cancelingVisibilityStore struct {
+	storage.Store
+	cancel context.CancelFunc
+	checks int
+}
+
+func (s *cancelingVisibilityStore) GetLatestGroupMetadata39000(context.Context, string, string) (*nostr.Event, error) {
+	s.checks++
+	s.cancel()
+	return nil, nil
+}
+
+func TestSnapshotCancellationStopsVisibilityAndCompletion(t *testing.T) {
+	for _, cancelConnection := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connection_%v", cancelConnection), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			st := &cancelingVisibilityStore{Store: &visibilityStoreStub{}, cancel: cancel}
+			srv := testVisibilityServer(t, st, testRelayIdentity(t))
+			c := registerTestConn(t, srv, "cancel-snapshot")
+			requestCtx := ctx
+			if cancelConnection {
+				c.ctx = ctx
+				requestCtx = context.Background()
+			}
+			if err := srv.subs.Add(c.ID, "sub", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
+				t.Fatal(err)
+			}
+			generation, _ := srv.subs.SubGeneration(c.ID, "sub")
+			if sendSnapshotEvents(requestCtx, srv, c, "sub", generation,
+				[]*nostr.Event{groupTaggedEvent(), groupTaggedEvent(), groupTaggedEvent()}) {
+				t.Fatal("canceled snapshot continued")
+			}
+			if st.checks != 1 {
+				t.Fatalf("visibility checks: got %d, want 1", st.checks)
+			}
+			// A caller racing cancellation at completion must not emit EOSE either.
+			if err := completeSnapshot(requestCtx, srv, c, "sub", generation); !errors.Is(err, context.Canceled) {
+				t.Fatalf("completion error: got %v, want context.Canceled", err)
+			}
+			select {
+			case message := <-c.send:
+				t.Fatalf("canceled snapshot emitted EVENT/EOSE: %s", message)
+			default:
+			}
+			srv.subs.mu.RLock()
+			entry := srv.subs.subs[c.ID]["sub"]
+			sent, dropped, eose := entry.initialSent.Load(), entry.initialDropped.Load(), entry.eoseSent.Load()
+			completed := entry.snapshotDone.Load()
+			srv.subs.mu.RUnlock()
+			if sent != 0 || dropped != 0 || eose != 0 || completed {
+				t.Fatal("canceled snapshot changed delivery counters or completed")
+			}
+		})
 	}
 }

@@ -277,24 +277,29 @@ func TestIsSameSnapshot(t *testing.T) {
 	if err := m.Add("c1", "s1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	opened, ok := m.SubOpenedUnix("c1", "s1")
+	opened, ok := m.SubGeneration("c1", "s1")
 	if !ok {
-		t.Fatal("SubOpenedUnix")
+		t.Fatal("SubGeneration")
 	}
 	if !m.IsSameSnapshot("c1", "s1", opened) {
 		t.Fatal("expected same snapshot")
 	}
 	if m.IsSameSnapshot("c1", "s1", opened-1) {
-		t.Fatal("expected stale opened_unix to mismatch")
+		t.Fatal("expected stale generation to mismatch")
 	}
-	time.Sleep(1100 * time.Millisecond)
+	m.mu.Lock()
+	m.subs["c1"]["s1"].openedUnix = 1
+	m.mu.Unlock()
 	if err := m.Add("c1", "s1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
 		t.Fatal(err)
 	}
+	m.mu.Lock()
+	m.subs["c1"]["s1"].openedUnix = 1
+	m.mu.Unlock()
 	if m.IsSameSnapshot("c1", "s1", opened) {
-		t.Fatal("expected replacement to invalidate stale opened_unix")
+		t.Fatal("expected replacement to invalidate stale generation")
 	}
-	reopened, ok := m.SubOpenedUnix("c1", "s1")
+	reopened, ok := m.SubGeneration("c1", "s1")
 	if !ok || !m.IsSameSnapshot("c1", "s1", reopened) {
 		t.Fatal("expected new snapshot after replacement")
 	}
@@ -312,5 +317,78 @@ func minimalRelayCfg() *config.Config {
 			MaxFiltersPerReq:              5,
 			ConnectionsPerMinutePerIP:     100,
 		},
+	}
+}
+
+func TestBroadcastChecksVisibilityOnlyForMatchingConnections(t *testing.T) {
+	m := NewSubscriptionManager(minimalRelayCfg(), zerolog.Nop())
+	for i := 0; i < 100; i++ {
+		id := fmt.Sprint(i)
+		m.RegisterSender(id, func([]byte) bool { return true })
+		if err := m.Add(id, "sub", []nostr.Filter{{Kinds: []int{7}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var calls atomic.Int64
+	visible := func(string, *nostr.Event) bool { calls.Add(1); return true }
+	m.Broadcast(&nostr.Event{ID: "event", Kind: 1}, visible)
+	if calls.Load() != 0 {
+		t.Fatal("visibility called for nonmatching subscriptions")
+	}
+	if err := m.Add("0", "one", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Add("0", "two", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	m.Broadcast(&nostr.Event{ID: "event", Kind: 1}, visible)
+	if calls.Load() != 1 {
+		t.Fatalf("visibility calls %d, want one per matching connection", calls.Load())
+	}
+}
+
+func TestBroadcastVisibilityDoesNotBlockReplacement(t *testing.T) {
+	m := NewSubscriptionManager(minimalRelayCfg(), zerolog.Nop())
+	var sent atomic.Int64
+	m.RegisterSender("c", func([]byte) bool { sent.Add(1); return true })
+	filters := []nostr.Filter{{Kinds: []int{1}}}
+	if err := m.Add("c", "s", filters); err != nil {
+		t.Fatal(err)
+	}
+	m.FinishSnapshot("c", "s")
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Broadcast(&nostr.Event{ID: "event", Kind: 1}, func(string, *nostr.Event) bool {
+			close(entered)
+			<-release
+			return true
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("visibility did not start")
+	}
+	replaced := make(chan error, 1)
+	go func() { replaced <- m.Add("c", "s", filters) }()
+	select {
+	case err := <-replaced:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("visibility held manager mutex")
+	}
+	close(release)
+	<-done
+	// Completion would flush any event wrongly buffered into the replacement.
+	m.FinishSnapshot("c", "s")
+	if sent.Load() != 0 {
+		t.Fatal("old broadcast reached replacement subscription")
 	}
 }

@@ -15,6 +15,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Review hardening: reject padded recipient keys and reserve NIP-77 session capacity atomically, including queued loads and replacements.
 - Admission hardening: trust forwarded client IPs only from configured proxies, reserve global connection capacity atomically, and close failed writers.
 - Storage and payload hardening: record fresh PostgreSQL migrations atomically and bound WebSocket payload expansion during reads.
+- Startup and subscription hardening: initialize fresh PostgreSQL databases, preserve timestamp-tied query results, and isolate replacement subscription snapshots.
+- Runtime hardening: match subscriptions before visibility checks, release the subscription lock during storage reads, stop canceled snapshots before further visibility reads, and shut down after listener failure.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.
@@ -67,6 +69,8 @@ python3 scripts/congee-smoke.py conduit-congee:review
 ```
 
 The image includes the static admin UI. CGO is required for libSQL. OCI labels identify this repository, the source commit, and the binary version.
+
+The Congee workflow runs fresh PostgreSQL startup and migration rollback regressions against an ephemeral PostgreSQL 17 service, with normal and race checks. These tests create and remove isolated schemas. Other PostgreSQL integration tests remain opt-in through `TEST_POSTGRES_DSN`; use a disposable test database because existing fixtures share rows and schema state. CI does not set this variable for the full suite.
 
 ## Release handoff
 

@@ -224,6 +224,10 @@ func applyFilterQueryPrefix(q *bun.SelectQuery, f *nostr.Filter, prefix string) 
 	if f.Until != nil {
 		q = q.Where(col("created_at")+" <= ?", *f.Until)
 	}
+	if f.Cursor != nil {
+		q = q.Where("("+col("created_at")+" < ? OR ("+col("created_at")+" = ? AND "+col("id")+" > ?))",
+			f.Cursor.CreatedAt, f.Cursor.CreatedAt, f.Cursor.ID)
+	}
 	for key, vals := range f.Tag {
 		if len(vals) == 0 {
 			q = q.Where("FALSE")
