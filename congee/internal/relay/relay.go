@@ -369,15 +369,17 @@ func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Track the connection before the upgrade removes it from HTTP shutdown tracking.
+	s.connWG.Add(1)
 	nc, useFlate, err := s.upgradeConn(w, r)
 	if err != nil {
+		s.connWG.Done()
 		s.ipOpen.release(peer)
 		s.log.Warn().Err(err).Str("remote", r.RemoteAddr).Str("peer_ip", peer).Msg("websocket upgrade failed")
 		return
 	}
 
 	accepted = true
-	s.connWG.Add(1)
 	go s.serveWS(nc, r, peer, useFlate)
 }
 

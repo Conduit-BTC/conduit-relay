@@ -48,7 +48,7 @@ func newConduitTestServer(t *testing.T, compression bool, budget int) (*Server, 
 	})
 	ts := httptest.NewServer(srv.http.Handler)
 	t.Cleanup(func() {
-		// Finish upgrade handlers before waiting for their hijacked connections.
+		// Stop new HTTP connections before draining tracked WebSockets.
 		ts.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
