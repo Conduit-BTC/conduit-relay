@@ -9,6 +9,27 @@ It is organized as a self-contained module area with:
 - runnable demo relay (`cmd/demo`)
 - demo validation script (`run_demo.sh`)
 
+## Automated review boundary
+
+Account-authenticated review execution belongs in a separate private runner.
+Public workflows must not receive the account credential or review App private
+key. The private runner reads an immutable pull request snapshot and submits
+actionable findings as inline review comments. It does not edit or push code.
+
+After maintainers enable the private runner, it polls ready, same-repository
+pull requests targeting `main`. Reviews can start several minutes after an
+update. A clean correctness review can trigger one automatic Ponytail simplicity
+review per pull request.
+
+The maintainer `m0wer` can request `/agent review` in a pull request comment or
+inline review comment. Use `/agent simplify` in a pull request comment for an
+explicit simplicity review. Each command must be the complete comment body.
+Other actors cannot request manual runs. Fork pull requests need human review.
+
+Code-changing agent hardening is paused. Maintainers must make fixes through
+normal pull requests and required CI. Report missing automated reviews to a
+maintainer; credential setup and runner recovery stay outside this public repo.
+
 ## Build the demo relay
 
 From this project root:
