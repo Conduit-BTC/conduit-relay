@@ -11,7 +11,7 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Baseline: [`michmich112/congee` develop at `c7456123896f12a148e214307b357abb6619f714`](https://github.com/michmich112/congee/tree/c7456123896f12a148e214307b357abb6619f714).
 - Recipient protection: [upstream PR 52](https://github.com/michmich112/congee/pull/52), commit `de2b2d275dbf779244a3fc4fc48a271298a95fc5`. The upstream scheduler guard was adapted to this baseline.
 - Search index repair: [upstream PR 53](https://github.com/michmich112/congee/pull/53), commit `6dddeca251427d0e5612b01605a19473255c5d4c`.
-- Conduit changes: strict browser origins, positive duplicate acknowledgments after validation, and startup validation of the schema-8 search layout.
+- Conduit changes: public browser discovery, positive duplicate acknowledgments after validation, and startup validation of the schema-8 search layout.
 - Review hardening: reject padded recipient keys and reserve NIP-77 session capacity atomically, including queued loads and replacements.
 - Admission hardening: trust forwarded client IPs only from configured proxies, reserve global connection capacity atomically, and close failed writers.
 - Storage and payload hardening: record fresh PostgreSQL migrations atomically and bound WebSocket payload expansion during reads.
@@ -23,20 +23,26 @@ This baseline includes replaceable revision ordering and NIP-50 ranking. The sea
 
 The previous deployed image does not have a recoverable source revision. This import establishes a source baseline; it does not prove equivalence with every previous binary patch.
 
-## Browser origins
+## Public relay access
 
-The production entrypoint always installs the origin policy. Configuration cannot disable it.
+The production entrypoint accepts standard Nostr WebSocket clients from external sites, local applications, and clients without an Origin header. Keep the existing write policy, event validation, authentication, and admission limits. Protected events still require the applicable reader authentication.
 
-Accept these WebSocket origins:
+NIP-11 discovery and its image assets allow browser reads from any origin. The entrypoint keeps this public discovery CORS enabled regardless of the upstream configuration flag. [NIP-11](https://github.com/nostr-protocol/nips/blob/master/11.md) requires browser CORS support for relay information.
+
+## HTTP enhancement boundary
+
+This source does not expose a public HTTP search or enrichment API. Plugins can intercept ordinary WebSocket `REQ` messages. Opening standard WebSockets also leaves that existing plugin path accessible. This release does not implement a separate enhancement entitlement or payment boundary.
+
+The HTTP plugin routes on the admin server remain admin APIs. Keep their Bearer authentication and sandboxed plugin UI behavior. Do not use privileged plugin admin actions as a public search transport.
+
+A future public HTTP enhancement endpoint must apply its access policy before plugin work. Its initial browser policy must allow only these HTTPS origins:
 
 - `https://shop.conduit.market`
 - `https://sell.conduit.market`
 - `https://<one-dns-label>.conduit-market-coo.pages.dev`
 - `https://<one-dns-label>.conduit-merchant-33n.pages.dev`
 
-The default HTTPS port, including explicit `:443`, is allowed. Reject missing origins, `null`, other hosts, paths, credentials, and other ports. Reject denied upgrades before connection admission or rate-limit accounting. Public health and NIP-11 discovery remain available. Browser discovery and image responses reflect only an allowed origin.
-
-Origin checks limit browser access. They do not authenticate clients: a non-browser client can set an Origin header. Keep event validation, authentication, and rate limits enabled.
+Keep that endpoint's origin checks and rate limits separate from ordinary relay access. An Origin header identifies browser context; it cannot authenticate a client. A restricted HTTP endpoint also needs to prevent equivalent enhanced work through the existing WebSocket interception path.
 
 ## Proxy and connection admission
 
@@ -80,7 +86,7 @@ The Congee workflow runs fresh PostgreSQL startup and migration rollback regress
 4. Push that tag. The Congee workflow validates it and publishes the image to GHCR.
 5. Record the image digest from the workflow. Deploy by digest, not a mutable tag.
 6. Preserve the existing `/data` volume, configuration, relay identity, and admin secret.
-7. Verify health, NIP-11 version, and origin rejection after deployment.
+7. Verify health, NIP-11 version, public discovery CORS, and external/local WebSocket access after deployment.
 8. Test search, listing revisions, exact replays, and recipient-protected messaging with synthetic events.
 
 No workflow deploys to Fly automatically. The release handoff must identify the operator, reviewed SHA, image digest, rehearsal evidence, and rollback image digest.

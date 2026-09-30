@@ -13,9 +13,9 @@ import (
 
 // NIP11Handler serves relay information when the client requests application/nostr+json.
 type NIP11Handler struct {
-	Cfg                *config.Config
-	RelayID            *relayidentity.Identity
-	conduitOriginsOnly bool
+	Cfg                 *config.Config
+	RelayID             *relayidentity.Identity
+	publicDiscoveryCORS bool
 }
 
 type nip11Doc struct {
@@ -75,9 +75,7 @@ func writeNIP11CORSPreflightDetails(w http.ResponseWriter, r *http.Request) {
 
 // ServeHTTP writes JSON metadata; callers should only invoke for GET / with matching Accept.
 func (h *NIP11Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.conduitOriginsOnly {
-		writeConduitNIP11CORS(w, r)
-	} else if h.Cfg.NIP11.CORSAllowAnyOrigin {
+	if h.publicDiscoveryCORS || h.Cfg.NIP11.CORSAllowAnyOrigin {
 		writeNIP11CORSResponse(w)
 	}
 	supported := slices.Clone(h.Cfg.NIPs.Enabled)

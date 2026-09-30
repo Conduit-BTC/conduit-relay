@@ -52,10 +52,10 @@ type Server struct {
 	plugins plugin.Runtime
 
 	configPath string
-	// Set only during construction by NewConduitServer; no runtime override.
-	conduitOriginsOnly bool
-	trustedProxies     []netip.Prefix
-	clientIPHeader     string
+	// Public discovery remains available in the Conduit executable.
+	publicDiscoveryCORS bool
+	trustedProxies      []netip.Prefix
+	clientIPHeader      string
 
 	negQueue          *NegQueue
 	negLoadSlots      chan struct{}
@@ -237,16 +237,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method == http.MethodOptions && (s.conduitOriginsOnly || s.cfg.NIP11.CORSAllowAnyOrigin) && !isWebSocketUpgrade(r) {
-		if s.conduitOriginsOnly {
-			if !writeConduitNIP11CORS(w, r) {
-				http.Error(w, "origin not allowed", http.StatusForbidden)
-				return
-			}
-			writeNIP11CORSPreflightDetails(w, r)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if r.Method == http.MethodOptions && (s.publicDiscoveryCORS || s.cfg.NIP11.CORSAllowAnyOrigin) && !isWebSocketUpgrade(r) {
 		writeNIP11CORSPreflightHeaders(w, r)
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -260,7 +251,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if AcceptsNostrJSON(r) {
-		(&NIP11Handler{Cfg: s.cfg, RelayID: s.relayID, conduitOriginsOnly: s.conduitOriginsOnly}).ServeHTTP(w, r)
+		(&NIP11Handler{Cfg: s.cfg, RelayID: s.relayID, publicDiscoveryCORS: s.publicDiscoveryCORS}).ServeHTTP(w, r)
 		return
 	}
 	w.Header().Set("Connection", "Upgrade")
@@ -329,13 +320,6 @@ func stringsFoldEq(a, b string) bool {
 }
 
 func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Reject before global limits, rate windows, IP tracking, or a hijacked socket.
-	if s.conduitOriginsOnly {
-		if _, ok := allowedConduitOrigin(r); !ok {
-			http.Error(w, "origin not allowed", http.StatusForbidden)
-			return
-		}
-	}
 	if !s.reserveConnection() {
 		if s.metrics != nil {
 			s.metrics.IncRateLimitMaxConnections()

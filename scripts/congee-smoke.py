@@ -86,27 +86,35 @@ def main():
                 raise RuntimeError("NIP-11 version mismatch")
             if not {1, 11, 17, 42, 50, 77}.issubset(info.get("supported_nips", [])):
                 raise RuntimeError("Required NIPs missing")
-            for origin in ("https://shop.conduit.market", "https://sell.conduit.market",
+            for origin in (None, "null", "https://example.com", "http://localhost:7000",
+                           "https://shop.conduit.market", "https://sell.conduit.market",
                            "https://fix-search.conduit-market-coo.pages.dev",
                            "https://a1b2c3.conduit-merchant-33n.pages.dev"):
                 if upgrade(port, origin) != 101:
-                    raise RuntimeError("Approved origin rejected")
-                status, headers, _ = get(port, "/", {
-                    "Accept": "application/nostr+json", "Origin": origin})
-                if status != 200 or headers.get("Access-Control-Allow-Origin") != origin:
-                    raise RuntimeError("Approved discovery CORS missing")
-            for origin in (None, "null", "https://example.com",
-                           "http://shop.conduit.market",
-                           "https://other.pages.dev",
-                           "https://nested.preview.conduit-market-coo.pages.dev"):
-                if upgrade(port, origin) != 403:
-                    raise RuntimeError("Denied origin admitted")
-            _, headers, _ = get(port, "/", {
-                "Accept": "application/nostr+json", "Origin": "https://example.com"})
-            if "Access-Control-Allow-Origin" in headers:
-                raise RuntimeError("Denied origin received discovery CORS")
+                    raise RuntimeError("Public Nostr client rejected")
+                discovery_headers = {"Accept": "application/nostr+json"}
+                if origin is not None:
+                    discovery_headers["Origin"] = origin
+                status, headers, _ = get(port, "/", discovery_headers)
+                if status != 200 or headers.get("Access-Control-Allow-Origin") != "*":
+                    raise RuntimeError("Public discovery CORS missing")
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            try:
+                conn.request("OPTIONS", "/", headers={
+                    "Origin": "https://example.com",
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "Accept"})
+                response = conn.getresponse()
+                if (response.status != 204 or
+                        response.getheader("Access-Control-Allow-Origin") != "*" or
+                        response.getheader("Access-Control-Allow-Methods") != "GET, OPTIONS" or
+                        response.getheader("Access-Control-Allow-Headers") != "Accept"):
+                    raise RuntimeError("Public discovery preflight failed")
+                response.read()
+            finally:
+                conn.close()
             docker("exec", container, "test", "-f", "/web/admin/build/index.html")
-            print("PASS: pinned binary, health, required NIPs, origins, CORS, and admin assets")
+            print("PASS: pinned binary, health, required NIPs, public WebSockets, CORS, and admin assets")
         finally:
             if container:
                 docker("rm", "--force", "--volumes", container)

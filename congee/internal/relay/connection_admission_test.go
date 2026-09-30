@@ -13,7 +13,7 @@ import (
 )
 
 func TestGlobalConnectionCapConcurrentUpgrades(t *testing.T) {
-	srv, ts := newConduitOriginTestServer(t, false, 100)
+	srv, ts := newConduitTestServer(t, false, 100)
 	srv.cfg.ConnectionLimits.MaxOpen = 3
 	const attempts = 32
 	start := make(chan struct{})
@@ -24,7 +24,7 @@ func TestGlobalConnectionCapConcurrentUpgrades(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			c, response, err := dialConduitOrigin(ts.URL, false, []string{"https://shop.conduit.market"})
+			c, response, err := dialRelayOrigin(ts.URL, false, []string{"https://shop.conduit.market"})
 			if err != nil {
 				if response == nil || response.StatusCode != http.StatusServiceUnavailable {
 					t.Errorf("unexpected rejection: %v", err)
@@ -60,7 +60,7 @@ func TestGlobalConnectionCapConcurrentUpgrades(t *testing.T) {
 }
 
 func TestFailedUpgradeReleasesGlobalReservation(t *testing.T) {
-	srv, ts := newConduitOriginTestServer(t, false, 100)
+	srv, ts := newConduitTestServer(t, false, 100)
 	srv.cfg.ConnectionLimits.MaxOpen = 1
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://shop.conduit.market")
@@ -70,7 +70,7 @@ func TestFailedUpgradeReleasesGlobalReservation(t *testing.T) {
 	if recorder.Code == http.StatusSwitchingProtocols || srv.OpenConnections() != 0 {
 		t.Fatalf("failed upgrade: status=%d open=%d", recorder.Code, srv.OpenConnections())
 	}
-	c, _, err := dialConduitOrigin(ts.URL, false, []string{"https://shop.conduit.market"})
+	c, _, err := dialRelayOrigin(ts.URL, false, []string{"https://shop.conduit.market"})
 	if err != nil {
 		t.Fatalf("failed reservation leaked: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestFailedUpgradeReleasesGlobalReservation(t *testing.T) {
 }
 
 func TestDirectSpoofedIPsShareConnectionBudget(t *testing.T) {
-	srv, ts := newConduitOriginTestServer(t, false, 100)
+	srv, ts := newConduitTestServer(t, false, 100)
 	srv.cfg.ConnectionLimits.MaxOpenPerIP = 1
 	url := "ws" + strings.TrimPrefix(ts.URL, "http")
 	dialer := websocket.Dialer{}

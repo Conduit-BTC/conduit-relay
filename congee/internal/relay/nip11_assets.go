@@ -18,9 +18,7 @@ var defaultIconSVG []byte
 var defaultBannerSVG []byte
 
 func (s *Server) serveNIP11Asset(w http.ResponseWriter, r *http.Request, asset string) {
-	if s.conduitOriginsOnly {
-		writeConduitNIP11CORS(w, r)
-	} else if s.cfg != nil && s.cfg.NIP11.CORSAllowAnyOrigin {
+	if s.publicDiscoveryCORS || (s.cfg != nil && s.cfg.NIP11.CORSAllowAnyOrigin) {
 		writeNIP11CORSResponse(w)
 	}
 	source := config.NIP11ImageSourceDefault
