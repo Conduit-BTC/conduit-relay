@@ -109,7 +109,10 @@ func nip29ValidateRestrictedWrite(ctx context.Context, store storage.Store, s *S
 		return nil
 	}
 	md, err := store.GetLatestGroupMetadata39000(ctx, rpk, gid)
-	if err != nil || md == nil || !nostr.NIP29MetadataIsRestricted(md) {
+	if err != nil {
+		return fmt.Errorf("nip-29: group metadata lookup failed: %w", err)
+	}
+	if md == nil || !nostr.NIP29MetadataIsRestricted(md) {
 		return nil
 	}
 	member, err := store.IsGroupMember(ctx, rpk, gid, ev.PubKey)
