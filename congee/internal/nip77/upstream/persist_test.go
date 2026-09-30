@@ -2,10 +2,18 @@ package upstream
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
+	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/gorilla/websocket"
 	"github.com/michmich112/congee/internal/config"
 	"github.com/michmich112/congee/internal/db"
 	"github.com/michmich112/congee/internal/nostr"
@@ -16,11 +24,18 @@ import (
 )
 
 type recordingRuntime struct {
-	mu     sync.Mutex
-	stored []*nostr.Event
+	mu       sync.Mutex
+	stored   []*nostr.Event
+	observed []string
 }
 
-func (r *recordingRuntime) Observe(any) {}
+func (r *recordingRuntime) Observe(msg any) {
+	if ev, ok := msg.(*nostr.EventMessage); ok {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.observed = append(r.observed, ev.Event.ID)
+	}
+}
 
 func (r *recordingRuntime) InterceptREQ(context.Context, *nostr.ReqMessage) plugin.InterceptResult {
 	return plugin.InterceptResult{Action: plugin.InterceptPassthrough}
@@ -153,5 +168,157 @@ func TestPersistImportedEventNilServer(t *testing.T) {
 	}
 	if !has {
 		t.Fatal("event should be stored")
+	}
+}
+
+func TestPersistImportedEventDeliversToLocalWebSocketSubscriptions(t *testing.T) {
+	if !turso.HasDriver() {
+		t.Skip("libsql driver not available")
+	}
+	ctx := context.Background()
+	st, closeFn, err := db.OpenTestStore(ctx, filepath.Join(t.TempDir(), "events.db"), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+	cfg := config.DefaultConfig()
+	srv, err := relay.NewServer(cfg, st, zerolog.Nop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.RegisterNIP01(srv, st)
+	rt := &recordingRuntime{}
+	srv.SetPluginRuntime(rt)
+	// Imports must retain their existing semantics, without re-running optional
+	// WebSocket post-store mutation hooks or connection-scoped audit hooks.
+	hookCalls := 0
+	srv.AppendPostHook("unexpected_import_hook", func(context.Context, relay.HookEnv) error {
+		hookCalls++
+		return nil
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ln) }()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		select {
+		case <-serveDone:
+		case <-shutdownCtx.Done():
+			t.Error("relay did not stop")
+		}
+	}()
+	client, response, err := websocket.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/", nil)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	readMessage := func() (string, []json.RawMessage) {
+		t.Helper()
+		_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var raw []json.RawMessage
+		if err := client.ReadJSON(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var typ string
+		if len(raw) < 2 || json.Unmarshal(raw[0], &typ) != nil {
+			t.Fatalf("invalid relay reply: %s", raw)
+		}
+		return typ, raw
+	}
+	for _, sub := range []struct {
+		id   string
+		kind int
+	}{{"listings", 30402}, {"unrelated", 1}, {"private", 1059}} {
+		if err := client.WriteJSON([]any{"REQ", sub.id, nostr.Filter{Kinds: []int{sub.kind}}}); err != nil {
+			t.Fatal(err)
+		}
+		typ, raw := readMessage()
+		if typ != "EOSE" || string(raw[1]) != `"`+sub.id+`"` {
+			t.Fatalf("subscription setup: %s %s", typ, raw)
+		}
+	}
+	priv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &nostr.Event{PubKey: hex.EncodeToString(schnorr.SerializePubKey(priv.PubKey())), CreatedAt: 2, Kind: 30402, Tags: [][]string{{"d", "listing"}}, Content: "imported"}
+	if err := ev.Sign(priv); err != nil {
+		t.Fatal(err)
+	}
+	sch := NewScheduler(cfg, st, srv, nil, zerolog.Nop())
+	if ok, err := sch.persistImportedEvent(ctx, ev); err != nil || !ok {
+		t.Fatalf("import: stored=%t err=%v", ok, err)
+	}
+	// A new snapshot provides a wire barrier after synchronous import delivery,
+	// so missing/extra fanout is detected without waiting for a read timeout.
+	barrier := func(id string, expected []*nostr.Event) {
+		t.Helper()
+		if err := client.WriteJSON([]any{"REQ", id, nostr.Filter{IDs: []string{strings.Repeat("f", 64)}}}); err != nil {
+			t.Fatal(err)
+		}
+		got := 0
+		for {
+			typ, raw := readMessage()
+			if typ == "EOSE" && string(raw[1]) == `"`+id+`"` {
+				break
+			}
+			if typ != "EVENT" || len(raw) < 3 || got >= len(expected) {
+				t.Fatalf("unexpected import reply: %s %s", typ, raw)
+			}
+			var delivered nostr.Event
+			if err := json.Unmarshal(raw[2], &delivered); err != nil {
+				t.Fatal(err)
+			}
+			if string(raw[1]) != `"listings"` || delivered.ID != expected[got].ID {
+				t.Fatalf("wrong import delivery: sub=%s id=%s", raw[1], delivered.ID)
+			}
+			got++
+		}
+		if got != len(expected) {
+			t.Fatalf("live imported events=%d want=%d", got, len(expected))
+		}
+	}
+	barrier("first", []*nostr.Event{ev})
+	older := *ev
+	older.CreatedAt--
+	if err := older.Sign(priv); err != nil {
+		t.Fatal(err)
+	}
+	for _, skipped := range []*nostr.Event{ev, &older} {
+		if ok, err := sch.persistImportedEvent(ctx, skipped); err != nil || ok {
+			t.Fatalf("duplicate/stale import: stored=%t err=%v", ok, err)
+		}
+	}
+	barrier("skipped", nil)
+	// Even direct imported-event delivery must use the relay's privacy gate.
+	// The upstream filter test independently prevents fetching this kind.
+	private := &nostr.Event{PubKey: ev.PubKey, CreatedAt: 2, Kind: 1059, Tags: [][]string{{"p", ev.PubKey}}, Content: "wrapped"}
+	if err := private.Sign(priv); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := sch.persistImportedEvent(ctx, private); err != nil || !ok {
+		t.Fatalf("private import: stored=%t err=%v", ok, err)
+	}
+	barrier("privacy", nil)
+	if hookCalls != 0 {
+		t.Fatalf("imports ran WebSocket mutation hooks %d times", hookCalls)
+	}
+	if got := rt.ids(); len(got) != 2 || got[0] != ev.ID || got[1] != private.ID {
+		t.Fatalf("plugin stored events: %v", got)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.observed) != 2 || rt.observed[0] != ev.ID || rt.observed[1] != private.ID {
+		t.Fatalf("plugin observed events: %v", rt.observed)
 	}
 }

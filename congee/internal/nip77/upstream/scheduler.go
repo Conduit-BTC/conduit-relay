@@ -371,6 +371,10 @@ fetch:
 			log.Debug().Str("id", id).Err(err).Msg("upstream event sig invalid")
 			continue
 		}
+		if !filter.Matches(ev) {
+			log.Debug().Str("id", id).Msg("upstream event outside sync filter")
+			continue
+		}
 		ok, err := sch.persistImportedEvent(ctx, ev)
 		if err != nil {
 			log.Debug().Str("id", id).Err(err).Msg("upstream save event failed")
@@ -385,9 +389,11 @@ fetch:
 	return needCount, imported, nil
 }
 
-// persistImportedEvent saves a newly fetched upstream event and notifies plugins.
+// persistImportedEvent saves a newly fetched upstream event and delivers it to
+// plugins and matching local subscriptions.
 // Returns false when the event was already present. Events are not re-validated
-// beyond the caller’s VerifySig — they skip the WebSocket EVENT hook chain.
+// beyond the caller's signature and sync-filter checks — they skip the
+// WebSocket EVENT hook chain.
 func (sch *Scheduler) persistImportedEvent(ctx context.Context, ev *nostr.Event) (bool, error) {
 	if sch == nil || sch.store == nil || ev == nil {
 		return false, nil
@@ -406,7 +412,7 @@ func (sch *Scheduler) persistImportedEvent(ctx context.Context, ev *nostr.Event)
 		return false, err
 	}
 	if sch.srv != nil {
-		sch.srv.NotifyPluginStoredEvent(ev, true)
+		sch.srv.DeliverImportedEvent(ev)
 	}
 	return true, nil
 }
