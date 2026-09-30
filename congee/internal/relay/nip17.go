@@ -88,7 +88,6 @@ func soleGiftWrapRecipient(ev *nostr.Event) (string, bool) {
 }
 
 func nip17ValidXOnlyPubKeyHex(s string) bool {
-	s = strings.TrimSpace(s)
 	if len(s) != 64 {
 		return false
 	}

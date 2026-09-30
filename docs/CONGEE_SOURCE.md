@@ -12,6 +12,7 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Recipient protection: [upstream PR 52](https://github.com/michmich112/congee/pull/52), commit `de2b2d275dbf779244a3fc4fc48a271298a95fc5`. The upstream scheduler guard was adapted to this baseline.
 - Search index repair: [upstream PR 53](https://github.com/michmich112/congee/pull/53), commit `6dddeca251427d0e5612b01605a19473255c5d4c`.
 - Conduit changes: strict browser origins, positive duplicate acknowledgments after validation, and startup validation of the schema-8 search layout.
+- Review hardening: reject padded recipient keys and reserve NIP-77 session capacity atomically, including queued loads and replacements.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.

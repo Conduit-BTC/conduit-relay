@@ -756,3 +756,49 @@ func TestEventVisibleToSubscriptionGiftWrapMultiplePWithheld(t *testing.T) {
 		t.Fatal("multiple-recipient gift wrap must be withheld")
 	}
 }
+
+// Signed events must be rejected, not normalized: changing a p tag breaks its ID.
+func TestHandleEVENT_NIP17_PaddedRecipientRejected(t *testing.T) {
+	t.Parallel()
+	priv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient := strings.Repeat("a", 64)
+	for _, kind := range []int{nip17KindGiftWrap, nip59KindEphemeralGiftWrap} {
+		for _, padded := range []string{" " + recipient, recipient + " ", "\t" + recipient + "\n", "\u00a0" + recipient} {
+			ev := signedGiftWrapEvent(t, priv, padded)
+			ev.Kind = kind
+			if _, err := ev.ComputeID(); err != nil {
+				t.Fatal(err)
+			}
+			if err := ev.Sign(priv); err != nil {
+				t.Fatal(err)
+			}
+			st := &visibilityStoreStub{}
+			srv, err := NewServer(nip17SecurityTestCfg(), st, zerolog.Nop(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registerNIP01NIP42NIP17(srv, st)
+			c := registerTestConnLargeSend(t, srv, "padded")
+			if err := handleEVENT(t.Context(), srv, st, c, &nostr.EventMessage{Event: *ev}); err != nil {
+				t.Fatal(err)
+			}
+			var reply []any
+			if err := json.Unmarshal(<-c.send, &reply); err != nil {
+				t.Fatal(err)
+			}
+			if len(reply) != 4 || reply[0] != "OK" || reply[2] != false || !strings.Contains(reply[3].(string), "canonical") {
+				t.Fatalf("kind %d padded recipient must be rejected: %v", kind, reply)
+			}
+			if _, ok := soleGiftWrapRecipient(ev); ok {
+				t.Fatal("padded recipient passed visibility validation")
+			}
+			c.nip42AddPubkey(recipient)
+			if err := validateNIP17REQ(srv.cfg, c, []nostr.Filter{{Kinds: []int{kind}, Tag: map[string][]string{"#p": {padded}}}}); err == nil || !strings.Contains(err.Error(), "canonical") {
+				t.Fatalf("padded recipient filter must be rejected as noncanonical: %v", err)
+			}
+		}
+	}
+}

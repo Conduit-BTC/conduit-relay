@@ -2,6 +2,7 @@ package relay
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/michmich112/congee/internal/nostr"
@@ -18,48 +19,63 @@ type negSession struct {
 	lastActUnix int64
 	neg         *negentropy.Negentropy
 	idleCancel  func()
+	active      *atomic.Int32 // owned reservation; released only under the map lock
 }
 
 type negSessionMap struct {
-	mu   sync.Mutex
-	byID map[string]*negSession
+	mu     sync.Mutex
+	byID   map[string]*negSession
+	closed bool
 }
 
 func newNegSessionMap() *negSessionMap {
 	return &negSessionMap{byID: make(map[string]*negSession)}
 }
 
-func (m *negSessionMap) close(subID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if s, ok := m.byID[subID]; ok {
-		if s.idleCancel != nil {
-			s.idleCancel()
-		}
-		delete(m.byID, subID)
-		return true
-	}
-	return false
-}
-
 func (m *negSessionMap) closeAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for id, s := range m.byID {
-		if s.idleCancel != nil {
-			s.idleCancel()
-		}
+		s.close()
 		delete(m.byID, id)
 	}
 }
 
-func (m *negSessionMap) set(subID string, s *negSession) {
+// reserve closes the previous subscription, then atomically acquires a global
+// slot. Pending loads live in the map so replacements and closes release them.
+func (m *negSessionMap) reserve(subID string, active *atomic.Int32, max int) (*negSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if old, ok := m.byID[subID]; ok && old.idleCancel != nil {
-		old.idleCancel()
+	if m.closed {
+		return nil, false
 	}
+	if old, ok := m.byID[subID]; ok {
+		old.close()
+		delete(m.byID, subID)
+	}
+	for {
+		n := active.Load()
+		if int(n) >= max {
+			return nil, false
+		}
+		if active.CompareAndSwap(n, n+1) {
+			break
+		}
+	}
+	s := &negSession{subID: subID, active: active}
 	m.byID[subID] = s
+	return s, true
+}
+
+func (s *negSession) close() {
+	if s.idleCancel != nil {
+		s.idleCancel()
+	}
+	if s.active != nil {
+		s.active.Add(-1)
+		s.active = nil
+	}
 }
 
 func (m *negSessionMap) get(subID string) (*negSession, bool) {
@@ -69,14 +85,19 @@ func (m *negSessionMap) get(subID string) (*negSession, bool) {
 	return s, ok
 }
 
+func (m *negSessionMap) getReady(subID string) (*negSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.byID[subID]
+	return s, ok && s.neg != nil
+}
+
 func (m *negSessionMap) remove(subID string) (*negSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.byID[subID]
 	if ok {
-		if s.idleCancel != nil {
-			s.idleCancel()
-		}
+		s.close()
 		delete(m.byID, subID)
 	}
 	return s, ok
@@ -93,9 +114,7 @@ func (m *negSessionMap) removeIf(subID string, s *negSession) bool {
 	if !ok || cur != s {
 		return false
 	}
-	if s.idleCancel != nil {
-		s.idleCancel()
-	}
+	s.close()
 	delete(m.byID, subID)
 	return true
 }

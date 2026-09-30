@@ -120,25 +120,17 @@ func handleNEGOpen(ctx context.Context, s *Server, c *Conn, msg *nostr.NegOpenMe
 	if s.RelayBusyForNeg() {
 		return s.sendNegBlocked(c, subID, "blocked: relay busy")
 	}
-	if int(s.negActiveSessions.Load()) >= config.EffectiveNIP77MaxConcurrentSessions(s.cfg) {
-		return s.sendNegBlocked(c, subID, "blocked: too many sync sessions")
-	}
 	if err := validateNegFilter(s.cfg, c, &msg.Filter); err != nil {
 		return s.sendNegBlocked(c, subID, err.Error())
 	}
 
-	if c.negSessions.close(subID) {
-		s.negActiveSessions.Add(-1)
+	sess, ok := c.negSessions.reserve(subID, &s.negActiveSessions, config.EffectiveNIP77MaxConcurrentSessions(s.cfg))
+	if !ok {
+		return s.sendNegBlocked(c, subID, "blocked: too many sync sessions")
 	}
-
-	// Reserve a concurrent-session slot at enqueue time so the configured
-	// limit is enforced synchronously rather than advisory (the async job
-	// releases it if no session ends up being created).
-	s.negActiveSessions.Add(1)
-
-	job := &negOpenJob{ctx: ctx, c: c, msg: msg}
+	job := &negOpenJob{ctx: ctx, c: c, msg: msg, sess: sess}
 	if !s.negQueue.Enqueue(job) {
-		s.negActiveSessions.Add(-1)
+		c.negSessions.removeIf(subID, sess)
 		return s.sendNegBlocked(c, subID, "blocked: sync queue full")
 	}
 	log.Debug().Str("sub_id", subID).Msg("nip77 neg-open enqueued")
@@ -150,12 +142,29 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	msg := job.msg
 	subID := msg.SubID
 	log := c.log
+	if current, ok := c.negSessions.get(subID); !ok || current != job.sess {
+		return
+	}
+	// Only this job's reservation may be released. Replaced or closed jobs
+	// must neither release a newer slot nor emit a response for its ID.
+	fail := func(reason string, blocked bool) {
+		c.negSessions.mu.Lock()
+		defer c.negSessions.mu.Unlock()
+		if c.negSessions.byID[subID] == job.sess {
+			job.sess.close()
+			delete(c.negSessions.byID, subID)
+			if blocked {
+				_ = s.sendNegBlocked(c, subID, reason)
+			} else {
+				_ = s.sendNegErr(c, subID, reason)
+			}
+		}
+	}
 
 	select {
 	case <-s.negLoadSlots:
 	default:
-		s.negActiveSessions.Add(-1)
-		_ = s.sendNegBlocked(c, subID, "blocked: sync load capacity reached")
+		fail("blocked: sync load capacity reached", true)
 		return
 	}
 	defer func() { s.negLoadSlots <- struct{}{} }()
@@ -164,15 +173,13 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	if maxRec > 0 {
 		n, err := s.store.CountEvents(job.ctx, []nostr.Filter{msg.Filter})
 		if err != nil {
-			s.negActiveSessions.Add(-1)
 			log.Warn().Err(err).Str("sub_id", subID).Msg("nip77 count failed")
-			_ = s.sendNegErr(c, subID, "error: count failed")
+			fail("error: count failed", false)
 			return
 		}
 		if n > maxRec {
-			s.negActiveSessions.Add(-1)
 			reason := fmt.Sprintf("blocked: this query is too big (%d records, max %d)", n, maxRec)
-			_ = s.sendNegBlocked(c, subID, reason)
+			fail(reason, true)
 			return
 		}
 	}
@@ -180,9 +187,8 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	t0 := time.Now()
 	items, err := s.store.QueryEventSyncItems(job.ctx, msg.Filter)
 	if err != nil {
-		s.negActiveSessions.Add(-1)
 		log.Warn().Err(err).Str("sub_id", subID).Msg("nip77 sync query failed")
-		_ = s.sendNegErr(c, subID, "error: query failed")
+		fail("error: query failed", false)
 		return
 	}
 	loadDur := time.Since(t0)
@@ -198,9 +204,8 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	t1 := time.Now()
 	out, err := neg.Reconcile(msg.InitialHex)
 	if err != nil {
-		s.negActiveSessions.Add(-1)
 		log.Warn().Err(err).Str("sub_id", subID).Msg("nip77 reconcile failed")
-		_ = s.sendNegErr(c, subID, "error: "+err.Error())
+		fail("error: "+err.Error(), false)
 		return
 	}
 	if s.metrics != nil {
@@ -208,23 +213,32 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 	}
 
 	now := time.Now().Unix()
-	sess := &negSession{
-		subID:       subID,
-		filter:      msg.Filter,
-		filterKinds: slices.Clone(msg.Filter.Kinds),
-		recordCount: len(items),
-		openedUnix:  now,
-		lastActUnix: now,
-		neg:         neg,
+	b, err := nostr.MarshalRelayNegMsg(subID, out)
+	if err != nil {
+		fail("error: marshal failed", false)
+		return
 	}
-	s.scheduleNegIdle(c, sess)
-
+	sess := job.sess
+	c.negSessions.mu.Lock()
+	if c.negSessions.byID[subID] != sess {
+		c.negSessions.mu.Unlock()
+		return
+	}
+	sess.filter = msg.Filter
+	sess.filterKinds = slices.Clone(msg.Filter.Kinds)
+	sess.recordCount = len(items)
+	sess.openedUnix = now
+	sess.lastActUnix = now
+	sess.neg = neg
+	// Order this response before a subsequent replacement of the same ID.
+	// enqueue is nonblocking and never takes the session-map lock.
+	if err := c.enqueue(b); err != nil || out == "" {
+		sess.close()
+		delete(c.negSessions.byID, subID)
+	}
+	c.negSessions.mu.Unlock()
 	if out != "" {
-		c.negSessions.set(subID, sess)
-	} else {
-		// No session was created (sync already complete): release the
-		// concurrent-session slot reserved at enqueue time.
-		s.negActiveSessions.Add(-1)
+		s.scheduleNegIdle(c, sess)
 	}
 
 	log.Info().
@@ -240,15 +254,14 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 		Detail:    fmt.Sprintf("conn_id=%s sub_id=%s record_count=%d filter_kinds=%s", c.ID, subID, len(items), negFilterKindsDetail(msg.Filter.Kinds)),
 	})
 
-	b, err := nostr.MarshalRelayNegMsg(subID, out)
-	if err != nil {
-		_ = s.sendNegErr(c, subID, "error: marshal failed")
-		return
-	}
-	_ = c.enqueue(b)
 }
 
 func (s *Server) scheduleNegIdle(c *Conn, sess *negSession) {
+	c.negSessions.mu.Lock()
+	defer c.negSessions.mu.Unlock()
+	if c.negSessions.byID[sess.subID] != sess {
+		return
+	}
 	if sess.idleCancel != nil {
 		sess.idleCancel()
 	}
@@ -264,7 +277,6 @@ func (s *Server) scheduleNegIdle(c *Conn, sess *negSession) {
 			return
 		case <-time.After(timeout):
 			if ok := c.negSessions.removeIf(sess.subID, sess); ok {
-				s.negActiveSessions.Add(-1)
 				c.log.Info().Str("sub_id", sess.subID).Msg("nip77 session idle closed")
 				_ = s.sendNegErr(c, sess.subID, "closed: you took too long to respond!")
 			}
@@ -281,20 +293,23 @@ func handleNEGMsg(ctx context.Context, s *Server, c *Conn, msg *nostr.NegMsgMess
 		s.metrics.IncNegMsg()
 	}
 
-	sess, ok := c.negSessions.get(msg.SubID)
+	sess, ok := c.negSessions.getReady(msg.SubID)
 	if !ok {
+		if sess != nil {
+			c.negSessions.removeIf(msg.SubID, sess)
+		}
 		return s.sendNegErr(c, msg.SubID, "closed: unknown subscription")
 	}
+	c.negSessions.mu.Lock()
 	sess.touchActivity()
+	c.negSessions.mu.Unlock()
 	s.scheduleNegIdle(c, sess)
 
 	t0 := time.Now()
 	out, err := sess.neg.Reconcile(msg.MessageHex)
 	if err != nil {
 		log.Warn().Err(err).Str("sub_id", msg.SubID).Msg("nip77 neg-msg reconcile failed")
-		if ok := c.negSessions.removeIf(msg.SubID, sess); ok {
-			s.negActiveSessions.Add(-1)
-		}
+		c.negSessions.removeIf(msg.SubID, sess)
 		return s.sendNegErr(c, msg.SubID, "error: "+err.Error())
 	}
 	if s.metrics != nil {
@@ -304,12 +319,11 @@ func handleNEGMsg(ctx context.Context, s *Server, c *Conn, msg *nostr.NegMsgMess
 	log.Debug().Str("sub_id", msg.SubID).Int("round", sess.rounds).Msg("nip77 neg-msg")
 
 	if out == "" {
-		if removed, _ := c.negSessions.remove(msg.SubID); removed != nil {
-			s.negActiveSessions.Add(-1)
+		if c.negSessions.removeIf(msg.SubID, sess) {
 			audit.Enqueue(storage.AuditEntry{
 				CreatedAt: time.Now().Unix(),
 				Action:    audit.ActionNegComplete,
-				Detail:    fmt.Sprintf("conn_id=%s sub_id=%s rounds=%d", c.ID, msg.SubID, removed.rounds),
+				Detail:    fmt.Sprintf("conn_id=%s sub_id=%s rounds=%d", c.ID, msg.SubID, sess.rounds),
 			})
 		}
 	}
@@ -324,7 +338,6 @@ func handleNEGMsg(ctx context.Context, s *Server, c *Conn, msg *nostr.NegMsgMess
 func handleNEGClose(ctx context.Context, s *Server, c *Conn, msg *nostr.NegCloseMessage) error {
 	_ = ctx
 	if removed, _ := c.negSessions.remove(msg.SubID); removed != nil {
-		c.server.negActiveSessions.Add(-1)
 		audit.Enqueue(storage.AuditEntry{
 			CreatedAt: time.Now().Unix(),
 			Action:    audit.ActionNegComplete,

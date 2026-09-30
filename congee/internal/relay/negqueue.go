@@ -8,9 +8,10 @@ import (
 )
 
 type negOpenJob struct {
-	ctx context.Context
-	c   *Conn
-	msg *nostr.NegOpenMessage
+	ctx  context.Context
+	c    *Conn
+	msg  *nostr.NegOpenMessage
+	sess *negSession
 }
 
 // NegQueue runs NEG-OPEN DB loads off the WebSocket read loop.

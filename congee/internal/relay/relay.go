@@ -453,11 +453,7 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 	}
 
 	c.log.Info().Msg("ws client disconnected")
-	n := c.negSessions.count()
 	c.negSessions.closeAll()
-	if c.server != nil && n > 0 {
-		c.server.negActiveSessions.Add(-int32(n))
-	}
 	s.persistConnAuditSession(c)
 
 	ids := s.subs.UnregisterSender(id)
