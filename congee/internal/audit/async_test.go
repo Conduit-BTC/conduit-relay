@@ -227,3 +227,24 @@ func TestEnqueueDropsWhenQueueFull(t *testing.T) {
 		t.Fatalf("persisted %d entries, want %d", len(meta.entries), AsyncQueueCapacity+1)
 	}
 }
+
+func TestEnqueueDuringShutdown(t *testing.T) {
+	StopAsyncWriter()
+	StartAsyncWriter(context.Background(), &memMetaStore{}, zerolog.Nop())
+	defer StopAsyncWriter()
+	start := make(chan struct{})
+	var writers sync.WaitGroup
+	for range 16 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			<-start
+			for range 128 {
+				Enqueue(storage.AuditEntry{CreatedAt: 1, Action: "shutdown_fixture"})
+			}
+		}()
+	}
+	close(start)
+	StopAsyncWriter()
+	writers.Wait()
+}

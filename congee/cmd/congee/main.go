@@ -77,11 +77,10 @@ func main() {
 		log.Fatal().Err(err).Msg("database open failed")
 	}
 	audit.StartAsyncWriter(ctx, storeDB, log)
-	defer audit.StopAsyncWriter()
 	dbClosed := false
 	defer func() {
 		if !dbClosed {
-			_ = storeDB.Close()
+			_ = drainAuditAndCloseStore(storeDB)
 		}
 	}()
 
@@ -168,13 +167,22 @@ func main() {
 	cancel()
 
 	if doRestart {
+		if upstreamSched != nil {
+			upstreamSched.Stop()
+		}
+		pluginMgr.Stop()
+		_ = drainAuditAndCloseStore(storeDB)
 		dbClosed = true
-		_ = storeDB.Close()
 		restartProcess(log)
 		return
 	}
 
 	log.Info().Msg("bye")
+}
+
+func drainAuditAndCloseStore(store io.Closer) error {
+	audit.StopAsyncWriter()
+	return store.Close()
 }
 
 // tryPrintVersion handles "congee version" and -version/--version without touching config or the network.

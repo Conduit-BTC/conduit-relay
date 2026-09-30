@@ -47,9 +47,9 @@ func StartAsyncWriter(ctx context.Context, st storage.MetaStore, log zerolog.Log
 // When the queue is full the entry is dropped and a warning is logged.
 func Enqueue(entry storage.AuditEntry) {
 	asyncMu.Lock()
+	defer asyncMu.Unlock()
 	ch := asyncCh
 	log := asyncLog
-	asyncMu.Unlock()
 	if ch == nil {
 		if log.GetLevel() != zerolog.Disabled {
 			log.Warn().Str("action", entry.Action).Msg("async audit writer not started; dropping entry")
