@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/michmich112/congee/internal/config"
+	"github.com/michmich112/congee/internal/plugin"
+	"github.com/rs/zerolog"
 )
 
 func TestPluginMutationsReportPersistenceFailure(t *testing.T) {
@@ -101,4 +103,84 @@ func TestPluginMutationsReportPersistenceFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigReplacementBlocksPluginMutations(t *testing.T) {
+	for _, replacement := range []string{"config", "nips", "icon", "banner", "migration"} {
+		for _, op := range []struct{ method, path, body string }{
+			{"POST", "/api/plugins/install", `{"path":"unused"}`},
+			{"POST", "/api/plugins/fixture/enable", ""},
+			{"POST", "/api/plugins/fixture/disable", ""},
+			{"POST", "/api/plugins/fixture/uninstall", `{}`},
+			{"PUT", "/api/plugins/fixture/settings", `{}`},
+			{"PUT", "/api/plugins/fixture/intercept-log", `{"limit":2}`},
+		} {
+			t.Run(replacement+op.path, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.json")
+				cfg := config.DefaultConfig()
+				cfg.Database.DSN = filepath.Join(dir, "source.db")
+				cfg.Plugins.Directory = filepath.Join(dir, "plugins")
+				cfg.Plugins.Items = []config.PluginItem{{ID: "fixture"}}
+				if err := config.WriteConfigAtomic(path, cfg); err != nil {
+					t.Fatal(err)
+				}
+				m := plugin.NewManager(cfg, path, nil, zerolog.Nop())
+				defer m.Stop()
+				s := NewServer(cfg, path, &configAuditStore{}, nil, zerolog.Nop(), interceptLogHTTPPassword, dir, nil, nil, config.RelayInstanceResolution{}, m)
+				handler := s.http.Handler
+				var committedCode int
+				switch replacement {
+				case "config":
+					next, err := config.Load(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					next.Relay.Port++
+					body, err := json.Marshal(next)
+					if err != nil {
+						t.Fatal(err)
+					}
+					committedCode = interceptLogReq(t, handler, "PUT", "/api/config", interceptLogHTTPPassword, body).Code
+				case "nips":
+					committedCode = interceptLogReq(t, handler, "PATCH", "/api/nips", interceptLogHTTPPassword, []byte(`{"nip":50,"enabled":true}`)).Code
+				case "icon", "banner":
+					upload := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						r.URL.Path = "/api/relay-assets/" + replacement
+						handler.ServeHTTP(w, r)
+					})
+					committedCode = postRelayAsset(t, upload, onePixelPNG(), "fixture.png", interceptLogHTTPPassword).Code
+				case "migration":
+					body, err := json.Marshal(migrationStartRequest{
+						Source:            migrationEndpoint{Type: "turso", DSN: cfg.Database.DSN},
+						Target:            migrationEndpoint{Type: "turso", DSN: filepath.Join(dir, "target.db")},
+						MakeTargetPrimary: true,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					committedCode = interceptLogReq(t, handler, "POST", "/api/migration/start", interceptLogHTTPPassword, body).Code
+				}
+				if committedCode != http.StatusOK {
+					t.Fatalf("replacement status %d", committedCode)
+				}
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := interceptLogReq(t, handler, op.method, op.path, interceptLogHTTPPassword, []byte(op.body))
+				if response.Code != http.StatusConflict {
+					t.Fatalf("stale mutation status %d", response.Code)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(after) != string(before) {
+					t.Fatal("plugin mutation overwrote replacement")
+				}
+			})
+		}
+	}
+
 }

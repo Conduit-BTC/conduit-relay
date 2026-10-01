@@ -570,10 +570,12 @@ func (in *instance) setDegraded(msg string) {
 }
 
 func (in *instance) settingsJSON() []byte {
+	in.mu.Lock()
+	defer in.mu.Unlock()
 	if len(in.item.Settings) == 0 {
 		return []byte("{}")
 	}
-	return in.item.Settings
+	return append([]byte(nil), in.item.Settings...)
 }
 
 func waitDialPlugin(ctx context.Context, sock string, timeout time.Duration) (pluginv1.PluginClient, *grpc.ClientConn, error) {

@@ -57,6 +57,10 @@ func (s *Server) handlePluginsInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.configReplacementPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration replacement committed; restart before changing plugins"})
+		return
+	}
 	var man any
 	var err error
 	if strings.TrimSpace(body.Path) != "" {
@@ -109,6 +113,10 @@ func (s *Server) pluginToggle(w http.ResponseWriter, r *http.Request, enable boo
 	id := r.PathValue("id")
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.configReplacementPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration replacement committed; restart before changing plugins"})
+		return
+	}
 	var err error
 	if enable {
 		err = s.plugins.Enable(id)
@@ -137,6 +145,10 @@ func (s *Server) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.configReplacementPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration replacement committed; restart before changing plugins"})
+		return
+	}
 	if err := s.plugins.Uninstall(id, body.WipeData); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -179,6 +191,10 @@ func (s *Server) handlePluginPutSettings(w http.ResponseWriter, r *http.Request)
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.configReplacementPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration replacement committed; restart before changing plugins"})
+		return
+	}
 	if err := s.plugins.ApplySettings(r.Context(), id, body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -256,6 +272,10 @@ func (s *Server) handlePluginPutInterceptLog(w http.ResponseWriter, r *http.Requ
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.configReplacementPending {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "configuration replacement committed; restart before changing plugins"})
+		return
+	}
 	limit := s.plugins.SetInterceptLogLimit(*body.Limit)
 	if !s.savePluginConfig(w, r, "plugin intercept log size") {
 		return

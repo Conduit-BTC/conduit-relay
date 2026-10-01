@@ -52,7 +52,7 @@ func handleGetRelayAsset(cfgPath, asset string) http.HandlerFunc {
 	}
 }
 
-func handlePostRelayAsset(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func(), asset string) http.HandlerFunc {
+func handlePostRelayAsset(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func(), asset string, onCommit ...func(bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		maxBytes := config.NIP11IconMaxBytes
 		if asset == config.NIP11AssetBanner {
@@ -98,11 +98,14 @@ func handlePostRelayAsset(cfgPath string, cfgMu *sync.Mutex, st storage.Store, l
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		needRestart := configRestartNeeded(prev, cfg)
+		for _, committed := range onCommit {
+			committed(needRestart)
+		}
 		diff := "previous_bytes=" + strconv.Itoa(len(prev)) + "\nnip11 " + asset + " source=upload"
 		if err := config.SaveConfigChange(r.Context(), st, "POST /api/relay-assets/"+asset, diff); err != nil {
 			log.Warn().Err(err).Str("asset", asset).Msg("nip11 upload saved but changelog write failed")
 		}
-		needRestart := configRestartNeeded(prev, cfg)
 		if needRestart && scheduleRestart != nil {
 			go scheduleRestartSoon(scheduleRestart)
 		}

@@ -214,7 +214,17 @@ func (m *RelayMetrics) flushCompletedMinute(ctx context.Context, store storage.S
 	if b.EventsStored == 0 && b.EventsRejected == 0 && b.ReqCount == 0 && b.CloseCount == 0 && b.QueryMsSum == 0 && b.QueryMsCount == 0 && b.SubscriptionsOpen == 0 {
 		return nil
 	}
-	return store.UpsertRelayMetricBucket(ctx, b)
+	if err := store.UpsertRelayMetricBucket(ctx, b); err != nil {
+		// Preserve activity for the next flush, including increments during I/O.
+		m.curEventsStored.Add(b.EventsStored)
+		m.curEventsRejected.Add(b.EventsRejected)
+		m.curReq.Add(b.ReqCount)
+		m.curClose.Add(b.CloseCount)
+		m.curQueryMsSum.Add(b.QueryMsSum)
+		m.curQueryMsCount.Add(b.QueryMsCount)
+		return err
+	}
+	return nil
 }
 
 func (m *RelayMetrics) purgeOldBuckets(ctx context.Context, store storage.Store, retentionDays int) {
@@ -273,5 +283,15 @@ func (m *RelayMetrics) FlushOpenMinute(ctx context.Context, store storage.Store,
 	if b.EventsStored == 0 && b.EventsRejected == 0 && b.ReqCount == 0 && b.CloseCount == 0 && b.QueryMsSum == 0 && b.QueryMsCount == 0 && b.SubscriptionsOpen == 0 {
 		return nil
 	}
-	return store.UpsertRelayMetricBucket(ctx, b)
+	if err := store.UpsertRelayMetricBucket(ctx, b); err != nil {
+		// Preserve activity for the next flush, including increments during I/O.
+		m.curEventsStored.Add(b.EventsStored)
+		m.curEventsRejected.Add(b.EventsRejected)
+		m.curReq.Add(b.ReqCount)
+		m.curClose.Add(b.CloseCount)
+		m.curQueryMsSum.Add(b.QueryMsSum)
+		m.curQueryMsCount.Add(b.QueryMsCount)
+		return err
+	}
+	return nil
 }

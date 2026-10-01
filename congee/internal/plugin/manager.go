@@ -26,12 +26,13 @@ type Manager struct {
 	log     zerolog.Logger
 	root    string
 
-	mu      sync.Mutex
-	inst    map[string]*instance
-	hostSrv *grpc.Server
-	hostLis net.Listener
-	ctx     context.Context
-	cancel  context.CancelFunc
+	settingsMu sync.Mutex // serialize settings RPCs and their commits
+	mu         sync.Mutex
+	inst       map[string]*instance
+	hostSrv    *grpc.Server
+	hostLis    net.Listener
+	ctx        context.Context
+	cancel     context.CancelFunc
 
 	listenEnqueued atomic.Int64
 	listenDropped  atomic.Int64
@@ -513,31 +514,40 @@ func (m *Manager) dropConfigItem(id string) {
 
 // ApplySettings pushes settings to a running plugin and persists them on the item.
 func (m *Manager) ApplySettings(ctx context.Context, id string, settings []byte) error {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+	m.mu.Lock()
+	in := m.inst[id]
+	m.mu.Unlock()
+	var res *pluginv1.ApplySettingsResponse
+	if in != nil && in.isReady() {
+		in.mu.Lock()
+		cli := in.client
+		in.mu.Unlock()
+		if cli != nil {
+			var err error
+			res, err = cli.ApplySettings(ctx, &pluginv1.ApplySettingsRequest{SettingsJson: string(settings)})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	// Commit only after the running plugin accepts the candidate settings.
 	m.mu.Lock()
 	if m.cfg != nil {
 		if _, idx := config.PluginItemByID(m.cfg, id); idx >= 0 {
 			m.cfg.Plugins.Items[idx].Settings = append([]byte(nil), settings...)
 		}
 	}
-	in := m.inst[id]
+	if in != nil {
+		in.mu.Lock()
+		in.item.Settings = append([]byte(nil), settings...)
+		if res != nil {
+			in.subs = subsFromV1(res.GetSubscriptions())
+		}
+		in.mu.Unlock()
+	}
 	m.mu.Unlock()
-	if in == nil || !in.isReady() {
-		return nil
-	}
-	in.mu.Lock()
-	in.item.Settings = append([]byte(nil), settings...)
-	cli := in.client
-	in.mu.Unlock()
-	if cli == nil {
-		return nil
-	}
-	res, err := cli.ApplySettings(ctx, &pluginv1.ApplySettingsRequest{SettingsJson: string(settings)})
-	if err != nil {
-		return err
-	}
-	in.mu.Lock()
-	in.subs = subsFromV1(res.GetSubscriptions())
-	in.mu.Unlock()
 	return nil
 }
 

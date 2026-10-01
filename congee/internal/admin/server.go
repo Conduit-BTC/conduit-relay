@@ -84,8 +84,9 @@ type Server struct {
 	devProxy          *httputil.ReverseProxy
 	static            http.Handler // SPA file server (production, or dev fallback when Vite is down)
 
-	cfgMu sync.Mutex
-	http  *http.Server
+	configReplacementPending bool // protected by cfgMu; plugin writes must wait for restart
+	cfgMu                    sync.Mutex
+	http                     *http.Server
 }
 
 // NewServer builds an admin server. staticDir is the filesystem root for production
@@ -142,11 +143,12 @@ func NewServer(cfg *config.Config, cfgPath string, store storage.Store, relaySrv
 	//   GET      /api/relay-identity   — relay pubkey_hex, npub, relay_instance_id (runtime)
 	//   POST     /api/migration/start  — sqlite/postgres copy; SSE progress events
 	//   POST     /api/migration/target-preflight  — JSON target schema check (no DDL)
+	configCommitted := func(changed bool) { s.configReplacementPending = s.configReplacementPending || changed }
 	api := http.NewServeMux()
 	api.HandleFunc("GET /config", handleGetConfig(cfgPath).ServeHTTP)
-	api.HandleFunc("PUT /config", handlePutConfig(cfgPath, &s.cfgMu, store, s.log, scheduleRestart).ServeHTTP)
-	api.HandleFunc("POST /relay-assets/icon", handlePostRelayAsset(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, config.NIP11AssetIcon))
-	api.HandleFunc("POST /relay-assets/banner", handlePostRelayAsset(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, config.NIP11AssetBanner))
+	api.HandleFunc("PUT /config", handlePutConfig(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, configCommitted).ServeHTTP)
+	api.HandleFunc("POST /relay-assets/icon", handlePostRelayAsset(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, config.NIP11AssetIcon, configCommitted))
+	api.HandleFunc("POST /relay-assets/banner", handlePostRelayAsset(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, config.NIP11AssetBanner, configCommitted))
 	api.HandleFunc("GET /relay-assets/icon", handleGetRelayAsset(cfgPath, config.NIP11AssetIcon))
 	api.HandleFunc("GET /relay-assets/banner", handleGetRelayAsset(cfgPath, config.NIP11AssetBanner))
 	api.HandleFunc("GET /config/changelog", handleConfigChangelog(store).ServeHTTP)
@@ -157,10 +159,10 @@ func NewServer(cfg *config.Config, cfgPath string, store storage.Store, relaySrv
 	api.HandleFunc("GET /events/{id}", handleGetEvent(store).ServeHTTP)
 	api.HandleFunc("GET /events", handleListEvents(store).ServeHTTP)
 	api.HandleFunc("GET /nips", handleNIPsGet(cfgPath).ServeHTTP)
-	api.HandleFunc("PATCH /nips", handleNIPsPatch(cfgPath, &s.cfgMu, store, s.log, scheduleRestart).ServeHTTP)
+	api.HandleFunc("PATCH /nips", handleNIPsPatch(cfgPath, &s.cfgMu, store, s.log, scheduleRestart, configCommitted).ServeHTTP)
 	api.HandleFunc("GET /stats", handleStats(cfg, relaySrv, store).ServeHTTP)
 	api.Handle("GET /relay-identity", handleRelayIdentity(relayID, s.relayInstanceBoot))
-	api.HandleFunc("POST /migration/start", handleMigrationStart(s.log, s.cfgPath, &s.cfgMu, store, scheduleRestart))
+	api.HandleFunc("POST /migration/start", handleMigrationStart(s.log, s.cfgPath, &s.cfgMu, store, scheduleRestart, configCommitted))
 	api.HandleFunc("POST /migration/target-preflight", handleMigrationTargetPreflight(s.log))
 	registerPluginRoutes(api, s)
 

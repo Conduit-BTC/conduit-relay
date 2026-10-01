@@ -23,6 +23,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Lifecycle and audit hardening: use collision-safe connection IDs, wait for WebSocket teardown, reclaim expired IP limiter entries, and preserve committed configuration changes when changelog writes fail.
 - Fetch and plugin hardening: match upstream replies to unique subscriptions and synchronize plugin configuration upgrades with relay reads.
 - Group-tag hardening: reject multiple nonempty group tags and hide existing ambiguous events from subscriptions and reconciliation.
+- Persistence hardening: bound PostgreSQL notification writes, retain metric counters after failed writes, and prevent plugin saves from overwriting committed configuration replacements.
+- Settings hardening: commit running-plugin settings only after acceptance and synchronize settings snapshots during startup.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.
@@ -59,6 +61,7 @@ Before deployment, configure `connection_limits.trusted_proxy_cidrs` with the ac
 An empty list trusts no proxy. Do not use public client networks or catch-all CIDRs.
 Select `connection_limits.trusted_proxy_client_ip_header` only when that proxy overwrites the header.
 For Fly HTTP ingress, select [`Fly-Client-IP`](https://www.fly.io/docs/networking/request-headers/); do not trust client-supplied Cloudflare headers through Fly.
+Fly's [proxy source library](https://github.com/superfly/flysrc-go/blob/fbeb9c4cbb0453b550cd8ebedece6a81acdb1cd9/lib.go) identifies `172.16.0.0/16` as its default proxy network. Confirm the deployed ingress uses this network before configuring it.
 For direct Cloudflare ingress, select `CF-Connecting-IP` and trust only that ingress.
 The default `X-Forwarded-For` mode walks the chain from the nearest proxy to the first untrusted address.
 Changes to proxy trust require a restart. Rehearse admission with two clients and forged headers before cutover.

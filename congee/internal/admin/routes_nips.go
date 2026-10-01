@@ -66,7 +66,7 @@ func handleNIPsGet(cfgPath string) http.HandlerFunc {
 	}
 }
 
-func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func()) http.HandlerFunc {
+func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func(), onCommit ...func(bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -110,6 +110,11 @@ func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log ze
 			http.Error(w, `{"error":"load config"}`, http.StatusInternalServerError)
 			return
 		}
+		previous, err := json.Marshal(cfg)
+		if err != nil {
+			http.Error(w, `{"error":"encode config"}`, http.StatusInternalServerError)
+			return
+		}
 		next := slices.Clone(cfg.NIPs.Enabled)
 		if req.Enabled {
 			if !slices.Contains(next, req.NIP) {
@@ -132,6 +137,9 @@ func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log ze
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
+		}
+		for _, committed := range onCommit {
+			committed(configRestartNeeded(previous, cfg))
 		}
 		summary := "PATCH /api/nips"
 		auditWarning := recordCommittedConfigChange(r.Context(), st, log, summary, string(body))

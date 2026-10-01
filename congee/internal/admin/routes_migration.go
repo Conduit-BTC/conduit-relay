@@ -155,7 +155,7 @@ func openMigrationSource(ctx context.Context, dbType, dsn, congeeInstanceID stri
 // applyPostMigrationDatabaseConfig updates database.type and database.dsn in the JSON config
 // to match the migration target, records a changelog row on the running relay meta store, and
 // returns whether the running relay must restart, any audit warning, and pre-commit errors.
-func applyPostMigrationDatabaseConfig(ctx context.Context, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, target migrationEndpoint, log zerolog.Logger) (restartNeeded bool, auditWarning string, err error) {
+func applyPostMigrationDatabaseConfig(ctx context.Context, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, target migrationEndpoint, log zerolog.Logger, onCommit ...func(bool)) (restartNeeded bool, auditWarning string, err error) {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
 
@@ -189,12 +189,15 @@ func applyPostMigrationDatabaseConfig(ctx context.Context, cfgPath string, cfgMu
 	if err := config.WriteConfigAtomic(cfgPath, cfg); err != nil {
 		return false, "", err
 	}
+	for _, committed := range onCommit {
+		committed(needRestart)
+	}
 	summary := "POST /api/migration/start: database set to " + dbType
 	auditWarning = recordCommittedConfigChange(ctx, meta, log, summary, diff)
 	return needRestart, auditWarning, nil
 }
 
-func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, scheduleRestart func()) http.HandlerFunc {
+func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, scheduleRestart func(), onCommit ...func(bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -313,7 +316,7 @@ func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex,
 		var cfgErr error
 		if req.MakeTargetPrimary {
 			l.Debug().Msg("make_target_primary: updating config file to target database")
-			restartNeeded, auditWarning, cfgErr = applyPostMigrationDatabaseConfig(ctx, cfgPath, cfgMu, meta, req.Target, l)
+			restartNeeded, auditWarning, cfgErr = applyPostMigrationDatabaseConfig(ctx, cfgPath, cfgMu, meta, req.Target, l, onCommit...)
 			if cfgErr != nil {
 				l.Warn().Err(cfgErr).Msg("migration copy ok but config update failed")
 			} else if restartNeeded && scheduleRestart != nil {

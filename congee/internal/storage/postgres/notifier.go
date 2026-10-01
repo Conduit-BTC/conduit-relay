@@ -8,14 +8,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 )
+
+const notifyTimeout = time.Second
 
 // Notifier implements storage.EventNotifier using pg_notify and a dedicated pgx LISTEN connection.
 type Notifier struct {
 	db     *bun.DB
 	dsn    string
 	origin string
+	ctx    context.Context
 
 	mu        sync.Mutex
 	ch        chan string
@@ -39,6 +43,7 @@ func NewNotifier(db *bun.DB, dsn, origin string) (*Notifier, error) {
 		db:     db,
 		dsn:    dsn,
 		origin: origin,
+		ctx:    ctx,
 		ch:     make(chan string, 256),
 		cancel: cancel,
 	}
@@ -54,7 +59,14 @@ func (n *Notifier) Notify(eventID string) {
 	if err != nil {
 		return
 	}
-	_, _ = n.db.ExecContext(context.Background(), `SELECT pg_notify('new_event', ?)`, string(b))
+	// Notification is best effort after the event commits. Bound both connection
+	// acquisition and execution, and cancel promptly when the notifier closes.
+	ctx, cancel := context.WithTimeout(n.ctx, notifyTimeout)
+	defer cancel()
+	if _, err := n.db.ExecContext(ctx, `SELECT pg_notify('new_event', ?)`, string(b)); err != nil {
+		// Database errors can contain the query and event payload.
+		log.Warn().Msg("postgres event notification failed")
+	}
 }
 
 // Listen returns a channel of event IDs originating from other instances.

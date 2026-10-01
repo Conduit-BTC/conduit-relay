@@ -31,7 +31,7 @@ func handleGetConfig(cfgPath string) http.HandlerFunc {
 	}
 }
 
-func handlePutConfig(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func()) http.HandlerFunc {
+func handlePutConfig(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func(), onCommit ...func(bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -69,6 +69,9 @@ func handlePutConfig(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log ze
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
+		}
+		for _, committed := range onCommit {
+			committed(needRestart)
 		}
 		if err := config.PruneNIP11Assets(cfgPath, newCfg); err != nil {
 			log.Warn().Err(err).Msg("nip11 asset cleanup failed")
