@@ -210,3 +210,88 @@ func TestMigrateFreshFailureRollsBackAndCanRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestMigrateV1FailureRollsBackAndCanRetry(t *testing.T) {
+	for _, failure := range []string{"CREATE INDEX", "UPDATE congee_schema_version"} {
+		t.Run(failure, func(t *testing.T) {
+			injected := errors.New("injected v1 migration failure")
+			conn := &migrationConn{failPrefix: failure, failErr: injected}
+			db := migrationTestDB(t, conn)
+			if err := migrateV1ToV2(context.Background(), db, zerolog.Nop()); !errors.Is(err, injected) {
+				t.Fatalf("expected injected failure, got %v", err)
+			}
+			if conn.rollbacks != 1 || conn.commits != 0 || conn.inTx || len(conn.pending) != 0 || len(conn.committed) != 0 {
+				t.Fatal("failed v1 migration left committed or pending writes")
+			}
+			conn.failPrefix = ""
+			if err := migrateV1ToV2(context.Background(), db, zerolog.Nop()); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			if conn.commits != 1 || len(conn.committed) != 3 || !strings.Contains(conn.committed[0], "ADD COLUMN IF NOT EXISTS") || !strings.Contains(conn.committed[2], "SET version = 2") {
+				t.Fatalf("unexpected committed transition: %+v", conn.committed)
+			}
+		})
+	}
+}
+
+func TestPostgresMigrateV1FailureAndPartialUpgradeCanRetry(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			ctx := context.Background()
+			db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn))), pgdialect.New())
+			db.SetMaxOpenConns(1)
+			t.Cleanup(func() { _ = db.Close() })
+			schema := bun.Ident(fmt.Sprintf("congee_v1_migration_test_%d", time.Now().UnixNano()))
+			if _, err := db.ExecContext(ctx, "CREATE SCHEMA ?", schema); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if _, err := db.ExecContext(ctx, "DROP SCHEMA ? CASCADE", schema); err != nil {
+					t.Errorf("clean up test schema: %v", err)
+				}
+			})
+			if _, err := db.ExecContext(ctx, "SET search_path TO ?", schema); err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range []string{
+				`CREATE TABLE events (id TEXT PRIMARY KEY, content TEXT NOT NULL)`,
+				`INSERT INTO events VALUES ('one', 'searchable keyword')`,
+				`CREATE TABLE congee_schema_version (id SMALLINT PRIMARY KEY, version INT NOT NULL)`,
+				`INSERT INTO congee_schema_version VALUES (1, 1)`,
+				`CREATE FUNCTION reject_version_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected version failure'; END; $$`,
+				`CREATE TRIGGER reject_version_update BEFORE UPDATE ON congee_schema_version FOR EACH ROW EXECUTE FUNCTION reject_version_update()`,
+			} {
+				if _, err := db.ExecContext(ctx, statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if partial {
+				if _, err := db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := migrateV1ToV2(ctx, db, zerolog.Nop()); err == nil {
+				t.Fatal("expected version write to fail")
+			}
+			var version int
+			if err := db.QueryRowContext(ctx, `SELECT version FROM congee_schema_version WHERE id = 1`).Scan(&version); err != nil || version != 1 {
+				t.Fatalf("failure changed schema version: version=%d err=%v", version, err)
+			}
+			var columnExists, indexExists bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'events' AND column_name = 'search_vector'), to_regclass('idx_events_search_vector') IS NOT NULL`).Scan(&columnExists, &indexExists); err != nil || columnExists != partial || indexExists {
+				t.Fatalf("failure did not roll back DDL: column=%v index=%v err=%v", columnExists, indexExists, err)
+			}
+			if _, err := db.ExecContext(ctx, `DROP TRIGGER reject_version_update ON congee_schema_version`); err != nil {
+				t.Fatal(err)
+			}
+			if err := migrateV1ToV2(ctx, db, zerolog.Nop()); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			var searchable bool
+			if err := db.QueryRowContext(ctx, `SELECT version, EXISTS(SELECT 1 FROM events WHERE search_vector @@ plainto_tsquery('english', 'keyword')) FROM congee_schema_version WHERE id = 1`).Scan(&version, &searchable); err != nil || version != 2 || !searchable {
+				t.Fatalf("retry failed to preserve searchable event: version=%d searchable=%v err=%v", version, searchable, err)
+			}
+		})
+	}
+}

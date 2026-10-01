@@ -127,16 +127,27 @@ func migrateFresh(ctx context.Context, db *bun.DB, engine string, log zerolog.Lo
 }
 
 func migrateV1ToV2(ctx context.Context, db *bun.DB, engine string, log zerolog.Logger) error {
-	log.Debug().Msg("schema v1->v2: fts5 and triggers")
-	if err := createFTS5AndTriggers(ctx, db, engine, log); err != nil {
-		return err
-	}
-	log.Debug().Msg("schema v1->v2: backfill event_fts")
-	if _, err := db.ExecContext(ctx, `INSERT INTO event_fts(event_id, content) SELECT id, content FROM events`); err != nil {
-		return fmt.Errorf("%s: backfill event_fts: %w", engine, err)
-	}
-	log.Debug().Msg("schema v1->v2: chain v2->v3")
-	return migrateV2ToV3(ctx, db, engine, log)
+	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		log.Debug().Msg("schema v1->v2: fts5 and triggers")
+		if err := createFTS5AndTriggers(ctx, tx, engine, log); err != nil {
+			return err
+		}
+		// Replace a backfill left by an interrupted older binary. The rebuild
+		// and version transition share a transaction, so retries cannot add
+		// duplicate FTS rows or discard the previous index on failure.
+		log.Debug().Msg("schema v1->v2: backfill event_fts")
+		for _, statement := range []string{
+			`DELETE FROM event_fts`,
+			`DELETE FROM event_fts_rowids`,
+			`INSERT INTO event_fts(event_id, content) SELECT id, content FROM events`,
+			`PRAGMA user_version = 2`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("%s: migrate v1->v2: %w", engine, err)
+			}
+		}
+		return nil
+	})
 }
 
 func migrateV2ToV3(ctx context.Context, db *bun.DB, engine string, log zerolog.Logger) error {
@@ -312,7 +323,7 @@ func migrateV7ToV8(ctx context.Context, db *bun.DB, engine string, log zerolog.L
 	})
 }
 
-func createFTS5AndTriggers(ctx context.Context, db *bun.DB, engine string, log zerolog.Logger) error {
+func createFTS5AndTriggers(ctx context.Context, db bun.IDB, engine string, log zerolog.Logger) error {
 	fts := []string{
 		`CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(
 			event_id UNINDEXED,

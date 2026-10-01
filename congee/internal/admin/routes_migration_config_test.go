@@ -1,10 +1,24 @@
 package admin
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/michmich112/congee/internal/config"
+	"github.com/rs/zerolog"
 )
+
+func TestMigrationRejectsAutomaticLiveCutover(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/migration/start", strings.NewReader(`{"make_target_primary":true}`))
+	response := httptest.NewRecorder()
+	restarted := false
+	handleMigrationStart(zerolog.Nop(), "nonexistent-config", nil, nil, func() { restarted = true })(response, req)
+	if response.Code != http.StatusConflict || restarted || !strings.Contains(response.Body.String(), "automatic database cutover is disabled") {
+		t.Fatalf("unsafe cutover was not blocked: status=%d restarted=%t", response.Code, restarted)
+	}
+}
 
 func TestMigrationCanonicalDBType(t *testing.T) {
 	if g, w := migrationCanonicalDBType(""), "turso"; g != w {

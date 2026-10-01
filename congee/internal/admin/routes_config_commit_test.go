@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/michmich112/congee/internal/config"
 	"github.com/michmich112/congee/internal/storage"
-	"github.com/michmich112/congee/internal/storage/turso"
 	"github.com/rs/zerolog"
 )
 
@@ -38,12 +36,9 @@ func (s *configAuditStore) SaveConfigChange(ctx context.Context, _ storage.Confi
 }
 
 func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
-	for _, operation := range []string{"config", "nips", "migration"} {
+	for _, operation := range []string{"config", "nips"} {
 		for _, failure := range []string{"unavailable", "canceled", "healthy"} {
 			t.Run(operation+"/"+failure, func(t *testing.T) {
-				if operation == "migration" && !turso.HasDriver() {
-					t.Skip("libsql driver not available")
-				}
 				dir := t.TempDir()
 				cfgPath := filepath.Join(dir, "config.json")
 				cfg := config.DefaultConfig()
@@ -60,7 +55,7 @@ func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
 					meta.err = nil
 				}
 				if failure == "canceled" {
-					// Cancel at the audit boundary, after the file and migration are committed.
+					// Cancel at the audit boundary, after the file is committed.
 					meta.cancel = cancel
 				}
 				var logs bytes.Buffer
@@ -80,14 +75,6 @@ func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
 					method = http.MethodPatch
 					body = []byte(`{"nip":50,"enabled":false}`)
 					handler = handleNIPsPatch(cfgPath, &mu, meta, log, restart)
-				case "migration":
-					method = http.MethodPost
-					body, _ = json.Marshal(migrationStartRequest{
-						Source:            migrationEndpoint{Type: "turso", DSN: cfg.Database.DSN},
-						Target:            migrationEndpoint{Type: "turso", DSN: filepath.Join(dir, "target.db")},
-						MakeTargetPrimary: true,
-					})
-					handler = handleMigrationStart(log, cfgPath, &mu, meta, restart)
 				}
 				req := httptest.NewRequest(method, "/api/"+operation, bytes.NewReader(body)).WithContext(ctx)
 				rr := httptest.NewRecorder()
@@ -96,12 +83,7 @@ func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
 					t.Fatalf("committed write reported HTTP %d: %s", rr.Code, rr.Body.String())
 				}
 				var result map[string]any
-				if operation == "migration" {
-					result = migrationDoneResponse(t, rr.Body.Bytes())
-					if result["config_updated"] != true || result["status"] != "ok" || result["config_error"] != nil {
-						t.Fatalf("committed migration reported config failure: %v", result)
-					}
-				} else if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+				if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
 					t.Fatal(err)
 				} else if result["ok"] != true {
 					t.Fatalf("committed write did not report success: %v", result)
@@ -132,10 +114,6 @@ func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
 					if slices.Contains(loaded.NIPs.Enabled, 50) {
 						t.Fatal("nip toggle was not committed")
 					}
-				case "migration":
-					if loaded.Database.DSN != filepath.Join(dir, "target.db") {
-						t.Fatal("migration target was not committed")
-					}
 				}
 				select {
 				case <-restarted:
@@ -147,24 +125,59 @@ func TestCommittedConfigRestartHandlesAuditOutcome(t *testing.T) {
 	}
 }
 
-func migrationDoneResponse(t *testing.T, body []byte) map[string]any {
-	t.Helper()
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	var event string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			event = strings.TrimPrefix(line, "event: ")
-		} else if event == "done" && strings.HasPrefix(line, "data: ") {
-			var done map[string]any
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &done); err != nil {
+func TestPostMigrationConfigHandlesAuditOutcome(t *testing.T) {
+	for _, outcome := range []string{"unavailable", "canceled", "healthy"} {
+		t.Run(outcome, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.json")
+			cfg := config.DefaultConfig()
+			cfg.Database.DSN = filepath.Join(dir, "source.db")
+			if err := config.WriteConfigAtomic(cfgPath, cfg); err != nil {
 				t.Fatal(err)
 			}
-			return done
-		}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			const privateError = "synthetic-private-audit-payload"
+			meta := &configAuditStore{err: errors.New(privateError)}
+			if outcome == "healthy" {
+				meta.err = nil
+			} else if outcome == "canceled" {
+				meta.cancel = cancel
+			}
+			var logs bytes.Buffer
+			var mu sync.Mutex
+			target := migrationEndpoint{Type: "turso", DSN: filepath.Join(dir, "target.db")}
+			committed := false
+			restart, warning, err := applyPostMigrationDatabaseConfig(ctx, cfgPath, &mu, meta, target, zerolog.New(&logs), func(needRestart bool) {
+				if meta.calls != 0 {
+					t.Fatal("commit callback ran after the audit attempt")
+				}
+				loaded, err := config.LoadJSON(cfgPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if loaded.Database.Type != target.Type || loaded.Database.DSN != target.DSN {
+					t.Fatal("commit callback ran before database config was persisted")
+				}
+				if !needRestart {
+					t.Fatal("database replacement did not require restart")
+				}
+				committed = true
+			})
+			if err != nil || !restart || !committed || meta.calls != 1 {
+				t.Fatalf("committed replacement outcome incorrect: restart=%v committed=%v calls=%d err=%v", restart, committed, meta.calls, err)
+			}
+			if (warning != "") != (outcome != "healthy") {
+				t.Fatalf("incorrect audit warning for %s", outcome)
+			}
+			if strings.Contains(warning+logs.String(), privateError) {
+				t.Fatal("audit error payload leaked into warning or logs")
+			}
+			if strings.Contains(logs.String(), "changelog write failed") != (outcome != "healthy") {
+				t.Fatal("operational log does not match audit outcome")
+			}
+		})
 	}
-	t.Fatalf("missing migration done event: %s", body)
-	return nil
 }
 
 func TestCommittedConfigAuditWarningWithoutRestartScheduler(t *testing.T) {

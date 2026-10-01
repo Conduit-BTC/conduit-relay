@@ -19,6 +19,7 @@ import (
 	"github.com/michmich112/congee/internal/db"
 	"github.com/michmich112/congee/internal/nip77"
 	"github.com/michmich112/congee/internal/nostr"
+	"github.com/michmich112/congee/internal/relay"
 	"github.com/michmich112/congee/internal/storage"
 	"github.com/michmich112/congee/internal/storage/turso"
 	"github.com/rs/zerolog"
@@ -155,7 +156,13 @@ func TestSyncFilterRejectsSignedEventsOutsideConfiguredFilter(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			sch := NewScheduler(config.DefaultConfig(), st, nil, nil, zerolog.Nop())
+			cfg := config.DefaultConfig()
+			srv, err := relay.NewServer(cfg, st, zerolog.Nop(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			relay.RegisterNIP01(srv, st)
+			sch := NewScheduler(cfg, st, srv, nil, zerolog.Nop())
 			need, imported, err := syncFilter(ctx, sch, zerolog.Nop(), client, url, f, 1<<20)
 			_ = client.Close()
 			if err != nil || need != len(events) || imported != wantImported {

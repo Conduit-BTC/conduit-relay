@@ -25,6 +25,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Group-tag hardening: reject multiple nonempty group tags and hide existing ambiguous events from subscriptions and reconciliation.
 - Persistence hardening: bound PostgreSQL notification writes, retain metric counters after failed writes, and prevent plugin saves from overwriting committed configuration replacements.
 - Settings hardening: commit running-plugin settings only after acceptance and synchronize settings snapshots during startup.
+- Import hardening: apply registered admission validators to upstream events without granting client authentication. Reject ephemeral imports before storage.
+- Migration hardening: copy one source snapshot, verify accepted events and source totals, and retry interrupted version-1 upgrades safely.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.
@@ -86,6 +88,8 @@ python3 scripts/congee-smoke.py conduit-congee:review
 The image includes the static admin UI. CGO is required for libSQL. OCI labels identify this repository, the source commit, and the binary version.
 
 The Congee workflow runs fresh PostgreSQL startup and migration rollback regressions against an ephemeral PostgreSQL 17 service, with normal and race checks. These tests create and remove isolated schemas. Other PostgreSQL integration tests remain opt-in through `TEST_POSTGRES_DSN`; use a disposable test database because existing fixtures share rows and schema state. CI does not set this variable for the full suite.
+
+The admin migration tool copies a consistent source snapshot. It excludes writes received after the snapshot starts. Automatic primary-database cutover is disabled. Stop writes and complete a verified offline migration before changing the primary database. This release preserves the current production database; it requires no database cutover or event re-ingestion.
 
 ## Release handoff
 

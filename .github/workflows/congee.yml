@@ -61,14 +61,14 @@ jobs:
           TEST_POSTGRES_DSN: postgres://congee_ci:congee_ci@127.0.0.1:5432/congee_ci?sslmode=disable
         run: >-
           go test -v -count=1
-          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion)$'
+          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion|TestPostgresMigrateV1FailureAndPartialUpgradeCanRetry)$'
           ./internal/db ./internal/storage/postgres
       - name: Race-check isolated PostgreSQL startup and migration rollback
         env:
           TEST_POSTGRES_DSN: postgres://congee_ci:congee_ci@127.0.0.1:5432/congee_ci?sslmode=disable
         run: >-
           go test -v -race -count=1
-          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion)$'
+          -run '^(TestOpenFreshPostgresDatabase|TestPostgresMigrateFreshFailurePreservesSchemaAndVersion|TestPostgresMigrateV1FailureAndPartialUpgradeCanRetry)$'
           ./internal/db ./internal/storage/postgres
       - name: Test plugin SDK
         working-directory: congee/sdk/plugin

@@ -2,14 +2,31 @@ package sqlevent
 
 import (
 	"context"
+	"net/url"
 
 	"github.com/michmich112/congee/internal/nostr"
 	"github.com/michmich112/congee/internal/storage"
+	"github.com/michmich112/congee/internal/storage/sqlitewriter"
+	"github.com/rs/zerolog"
 )
 
 var _ storage.MigrationSource = (*Store)(nil)
 
-var _ storage.MigrationSource = (*Store)(nil)
+func (s *Store) BeginMigrationSnapshot(ctx context.Context) (storage.MigrationSnapshot, error) {
+	// Use a private-cache connection so a long snapshot does not hold the
+	// writer queue's only connection or shared-cache table locks.
+	dsn := (&url.URL{Scheme: "file", Path: s.dbPath, RawQuery: "cache=private"}).String()
+	_, db, err := sqlitewriter.OpenLibsqlHandles(ctx, dsn, zerolog.Nop())
+	if err != nil {
+		return nil, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &storage.SQLMigrationSnapshot{Tx: tx, CloseDB: db.Close}, nil
+}
 
 // MigrationRowCounts returns table row totals for migration verification.
 func (s *Store) MigrationRowCounts(ctx context.Context) (storage.MigrationCounts, error) {
@@ -31,34 +48,10 @@ func (s *Store) MigrationRowCounts(ctx context.Context) (storage.MigrationCounts
 
 // ScanEventsForMigration iterates all events in stable order.
 func (s *Store) ScanEventsForMigration(ctx context.Context, fn func(ev *nostr.Event) error) error {
-	const page = 500
-	var lastCA int64
-	var lastID string
-	var started bool
-	for {
-		var rows []storage.EventRow
-		q := s.db().NewSelect().Model(&rows).Order("created_at ASC", "id ASC").Limit(page)
-		if started {
-			q = q.Where("(created_at > ?) OR (created_at = ? AND id > ?)", lastCA, lastCA, lastID)
-		}
-		if err := q.Scan(ctx); err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			break
-		}
-		for i := range rows {
-			ev, err := s.rowToEvent(ctx, &rows[i])
-			if err != nil {
-				return err
-			}
-			if err := fn(ev); err != nil {
-				return err
-			}
-		}
-		last := rows[len(rows)-1]
-		lastCA, lastID = last.CreatedAt, last.ID
-		started = true
+	snapshot, err := s.BeginMigrationSnapshot(ctx)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer snapshot.Close()
+	return snapshot.ScanEventsForMigration(ctx, fn)
 }

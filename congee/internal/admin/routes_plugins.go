@@ -160,6 +160,8 @@ func (s *Server) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginGetSettings(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 	id := r.PathValue("id")
 	if s.cfg == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"settings": map[string]any{}})

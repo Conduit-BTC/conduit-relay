@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -176,6 +177,18 @@ func (s *Server) RegisterMessageHandler(typ string, h MessageHandler) {
 // AppendValidator adds to the event validation chain.
 func (s *Server) AppendValidator(v EventValidator) {
 	s.validators.Append(v)
+}
+
+// ValidateImportedEvent applies the registered admission policy without granting
+// an upstream event a client's authenticated session or running post-store hooks.
+func (s *Server) ValidateImportedEvent(ctx context.Context, ev *nostr.Event) error {
+	if s == nil || ev == nil {
+		return fmt.Errorf("upstream import requires relay admission validation")
+	}
+	if nostr.IsEphemeral(ev.Kind) {
+		return fmt.Errorf("upstream import cannot persist ephemeral events")
+	}
+	return s.validators.Validate(ctx, &Conn{}, ev)
 }
 
 // AppendPostHook adds a post-accept hook with a stable name (logged on hook failure).

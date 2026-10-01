@@ -217,6 +217,10 @@ func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex,
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		if req.MakeTargetPrimary {
+			http.Error(w, "automatic database cutover is disabled: stop writes and complete a verified offline migration before changing the primary database", http.StatusConflict)
+			return
+		}
 		if req.Target.Type == "" {
 			log.Warn().
 				Str("handler", "migration_start").

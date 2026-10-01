@@ -391,9 +391,9 @@ fetch:
 
 // persistImportedEvent saves a newly fetched upstream event and delivers it to
 // plugins and matching local subscriptions.
-// Returns false when the event was already present. Events are not re-validated
-// beyond the caller's signature and sync-filter checks — they skip the
-// WebSocket EVENT hook chain.
+// Returns false when the event was already present. New events must pass the
+// registered relay validators without client authentication. Imports skip the
+// WebSocket post-store mutation and connection audit hooks.
 func (sch *Scheduler) persistImportedEvent(ctx context.Context, ev *nostr.Event) (bool, error) {
 	if sch == nil || sch.store == nil || ev == nil {
 		return false, nil
@@ -404,6 +404,9 @@ func (sch *Scheduler) persistImportedEvent(ctx context.Context, ev *nostr.Event)
 	}
 	if has {
 		return false, nil
+	}
+	if err := sch.srv.ValidateImportedEvent(ctx, ev); err != nil {
+		return false, err
 	}
 	if err := sch.store.SaveEvent(ctx, ev); err != nil {
 		if errors.Is(err, storage.ErrStaleReplaceable) {

@@ -5,12 +5,41 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/michmich112/congee/internal/config"
 	"github.com/michmich112/congee/internal/plugin"
 	"github.com/rs/zerolog"
 )
+
+func TestPluginSettingsReadsDuringMutations(t *testing.T) {
+	_, handler, _, stop := interceptLogHTTP(t)
+	defer stop()
+	var workers sync.WaitGroup
+	for worker := 0; worker < 3; worker++ {
+		workers.Add(1)
+		go func(write bool) {
+			defer workers.Done()
+			for i := 0; i < 100; i++ {
+				method, body := http.MethodGet, []byte(nil)
+				if write {
+					method, body = http.MethodPut, []byte(`{"mode":"synthetic"}`)
+				}
+				response := interceptLogReq(t, handler, method, "/api/plugins/fixture/settings", interceptLogHTTPPassword, body)
+				if response.Code != http.StatusOK {
+					t.Errorf("settings request: status=%d", response.Code)
+					return
+				}
+				if !write && !json.Valid(response.Body.Bytes()) {
+					t.Error("settings response is invalid JSON")
+					return
+				}
+			}
+		}(worker == 0)
+	}
+	workers.Wait()
+}
 
 func TestPluginMutationsReportPersistenceFailure(t *testing.T) {
 	for _, operation := range []struct {
@@ -106,7 +135,7 @@ func TestPluginMutationsReportPersistenceFailure(t *testing.T) {
 }
 
 func TestConfigReplacementBlocksPluginMutations(t *testing.T) {
-	for _, replacement := range []string{"config", "nips", "icon", "banner", "migration"} {
+	for _, replacement := range []string{"config", "nips", "icon", "banner"} {
 		for _, op := range []struct{ method, path, body string }{
 			{"POST", "/api/plugins/install", `{"path":"unused"}`},
 			{"POST", "/api/plugins/fixture/enable", ""},
@@ -150,16 +179,6 @@ func TestConfigReplacementBlocksPluginMutations(t *testing.T) {
 						handler.ServeHTTP(w, r)
 					})
 					committedCode = postRelayAsset(t, upload, onePixelPNG(), "fixture.png", interceptLogHTTPPassword).Code
-				case "migration":
-					body, err := json.Marshal(migrationStartRequest{
-						Source:            migrationEndpoint{Type: "turso", DSN: cfg.Database.DSN},
-						Target:            migrationEndpoint{Type: "turso", DSN: filepath.Join(dir, "target.db")},
-						MakeTargetPrimary: true,
-					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					committedCode = interceptLogReq(t, handler, "POST", "/api/migration/start", interceptLogHTTPPassword, body).Code
 				}
 				if committedCode != http.StatusOK {
 					t.Fatalf("replacement status %d", committedCode)

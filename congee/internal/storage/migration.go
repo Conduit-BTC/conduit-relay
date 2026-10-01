@@ -32,4 +32,12 @@ type MigrationSource interface {
 	EventStore
 	MigrationRowCounts(ctx context.Context) (MigrationCounts, error)
 	ScanEventsForMigration(ctx context.Context, fn func(ev *nostr.Event) error) error
+	BeginMigrationSnapshot(ctx context.Context) (MigrationSnapshot, error)
+}
+
+// MigrationSnapshot keeps counts, event rows, and tags in one read transaction.
+type MigrationSnapshot interface {
+	MigrationRowCounts(context.Context) (MigrationCounts, error)
+	ScanEventsForMigration(context.Context, func(*nostr.Event) error) error
+	Close() error
 }

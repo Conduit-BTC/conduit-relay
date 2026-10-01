@@ -137,24 +137,26 @@ func migrateFresh(ctx context.Context, db *bun.DB, log zerolog.Logger) error {
 
 func migrateV1ToV2(ctx context.Context, db *bun.DB, log zerolog.Logger) error {
 	stmts := []string{
-		`ALTER TABLE events ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED`,
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED`,
 		`CREATE INDEX IF NOT EXISTS idx_events_search_vector ON events USING GIN (search_vector)`,
 		`UPDATE congee_schema_version SET version = ? WHERE id = 1`,
 	}
-	log.Debug().Int("step", 0).Msg("schema v1->v2: add search_vector column")
-	if _, err := db.ExecContext(ctx, stmts[0]); err != nil {
-		return fmt.Errorf("postgres: add search_vector: %w", err)
+	// Older binaries could leave the column committed while the version stayed
+	// at 1. Accept that state and commit this transition atomically on retries.
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		for i, statement := range stmts[:2] {
+			log.Debug().Int("ddl_step", i).Msg("schema v1->v2: search index")
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, stmts[2], 2)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: migrate v1->v2: %w", err)
 	}
-	log.Debug().Int("step", 1).Msg("schema v1->v2: create gin index")
-	if _, err := db.ExecContext(ctx, stmts[1]); err != nil {
-		return fmt.Errorf("postgres: gin index: %w", err)
-	}
-	log.Debug().Int("step", 2).Msg("schema v1->v2: bump schema version to 2")
-	if _, err := db.ExecContext(ctx, stmts[2], 2); err != nil {
-		return fmt.Errorf("postgres: bump schema version: %w", err)
-	}
-	log.Debug().Msg("schema v1->v2: chain v2->v3")
-	return migrateV2ToV3(ctx, db, log)
+	return nil
 }
 
 func migrateV2ToV3(ctx context.Context, db *bun.DB, log zerolog.Logger) error {

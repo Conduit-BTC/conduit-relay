@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/michmich112/congee/internal/nostr"
 )
 
 // Migrate copies events (with tags) from src to dst.
 // Events already present on dst (same event id) are skipped.
-// dst may be pre-populated; verification compares row deltas against dst's counts at start.
+// Source counts and rows use one snapshot. The destination may be pre-populated;
+// every accepted event is read back, and all source events and tags are counted.
+// This copy does not include writes made after the snapshot starts.
 // progress is optional; it may be called from the caller's goroutine frequently during the run.
 // debug is optional; when non-nil it receives short milestone strings (not per-row).
 // On success, the returned summary describes rows copied and final destination totals.
@@ -23,9 +26,14 @@ func Migrate(ctx context.Context, src, dst MigrationSource, progress func(Migrat
 	}
 
 	ctx = WithBulkMigration(ctx)
+	snapshot, err := src.BeginMigrationSnapshot(ctx)
+	if err != nil {
+		return MigrationSummary{}, fmt.Errorf("migration: source snapshot: %w", err)
+	}
+	defer snapshot.Close()
 
 	progress(MigrationProgress{Percent: 0, Message: "counting source rows"})
-	srcCounts, err := src.MigrationRowCounts(ctx)
+	srcCounts, err := snapshot.MigrationRowCounts(ctx)
 	if err != nil {
 		return MigrationSummary{}, fmt.Errorf("migration: source counts: %w", err)
 	}
@@ -53,15 +61,30 @@ func Migrate(ctx context.Context, src, dst MigrationSource, progress func(Migrat
 	progress(MigrationProgress{Percent: 1, Message: fmt.Sprintf("copying events (0 / %d)", srcCounts.Events)})
 	var evInserted, evSkipped int64
 	var tagsAdded int64
-	err = src.ScanEventsForMigration(ctx, func(ev *nostr.Event) error {
+	var tagsScanned int64
+	verifyEvent := func(ev *nostr.Event) error {
+		stored, err := dst.QueryEvents(ctx, []nostr.Filter{{IDs: []string{ev.ID}}})
+		if err != nil {
+			return fmt.Errorf("migration: verify stored event: %w", err)
+		}
+		if len(stored) != 1 || !reflect.DeepEqual(stored[0], ev) {
+			return fmt.Errorf("migration: destination event verification failed")
+		}
+		return nil
+	}
+	err = snapshot.ScanEventsForMigration(ctx, func(ev *nostr.Event) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		tagsScanned += int64(len(ev.Tags))
 		exists, err := dst.HasEventID(ctx, ev.ID)
 		if err != nil {
 			return fmt.Errorf("migration: check event %s: %w", ev.ID, err)
 		}
 		if exists {
+			if err := verifyEvent(ev); err != nil {
+				return err
+			}
 			evSkipped++
 			done++
 			if srcCounts.Events > 0 {
@@ -80,6 +103,9 @@ func Migrate(ctx context.Context, src, dst MigrationSource, progress func(Migrat
 			}
 			return nil
 		}
+		if err := verifyEvent(ev); err != nil {
+			return err
+		}
 		evInserted++
 		tagsAdded += int64(len(ev.Tags))
 		done++
@@ -90,6 +116,9 @@ func Migrate(ctx context.Context, src, dst MigrationSource, progress func(Migrat
 	})
 	if err != nil {
 		return MigrationSummary{}, err
+	}
+	if done != srcCounts.Events || tagsScanned != srcCounts.Tags {
+		return MigrationSummary{}, fmt.Errorf("migration: source snapshot totals do not match scanned events and tags")
 	}
 	debug(fmt.Sprintf("events_copy_done inserted=%d skipped=%d", evInserted, evSkipped))
 

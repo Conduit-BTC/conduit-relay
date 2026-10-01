@@ -1,23 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Plus from '@lucide/svelte/icons/plus';
 	import { adminFetch } from '$lib/admin-api';
 	import { parseConfigJson } from '$lib/app-config';
 	import * as Alert from '$lib/components/ui/alert';
-	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import { Button } from '$lib/components/ui/button';
 	import { ButtonGroup } from '$lib/components/ui/button-group';
 	import * as Card from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
-	import {
-		DropdownMenu,
-		DropdownMenuContent,
-		DropdownMenuGroup,
-		DropdownMenuItem,
-		DropdownMenuTrigger
-	} from '$lib/components/ui/dropdown-menu';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { cn } from '$lib/utils';
 
 	type Endpoint = {
 		type: 'postgres' | 'turso' | '';
@@ -438,9 +429,9 @@
 					</Alert.Root>
 				{:else if !outcome.make_target_primary}
 					<p class="text-sm text-muted-foreground">
-						Relay configuration was left unchanged (data copy only). To point Congee at this target, use
-						<span class="font-medium text-foreground">Start migration &amp; make target primary DB</span>
-						from the <span class="font-medium text-foreground">+</span> menu or edit <code class="text-xs">database</code> in the config file.
+						This copy includes the source snapshot only. Writes received after the snapshot starts are
+						excluded. Automatic cutover is disabled. Stop writes and complete a verified offline
+						migration before changing the primary database.
 					</p>
 				{/if}
 			</div>
@@ -455,29 +446,6 @@
 			>
 				{busy ? 'Running…' : 'Start migration'}
 			</Button>
-			<DropdownMenu>
-				<DropdownMenuTrigger
-					class={cn(
-						buttonVariants({ variant: 'outline', size: 'icon' }),
-						'disabled:pointer-events-none disabled:opacity-50'
-					)}
-					disabled={busy || !!configLoadError || !sourceHydrated}
-					aria-label="Make target primary database (opens menu)"
-				>
-					<Plus class="size-4 opacity-90" />
-				</DropdownMenuTrigger>
-				<DropdownMenuContent align="end" class="min-w-56">
-					<DropdownMenuGroup>
-						<DropdownMenuItem
-							disabled={busy || !!configLoadError || !sourceHydrated}
-							onclick={() => void startMigration(true)}
-							class="whitespace-normal"
-						>
-							Start migration &amp; make target primary DB
-						</DropdownMenuItem>
-					</DropdownMenuGroup>
-				</DropdownMenuContent>
-			</DropdownMenu>
 		</ButtonGroup>
 	</Card.Content>
 </Card.Root>

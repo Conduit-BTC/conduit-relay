@@ -156,18 +156,84 @@ func TestPersistImportedEventNilServer(t *testing.T) {
 		Sig:       "cc",
 	}
 	ok, err := sch.persistImportedEvent(ctx, ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("expected import")
+	if err == nil || ok {
+		t.Fatal("import without an admission policy must fail")
 	}
 	has, err := st.HasEventID(ctx, ev.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !has {
-		t.Fatal("event should be stored")
+	if has {
+		t.Fatal("unvalidated event was stored")
+	}
+}
+
+func TestPersistImportedEventAppliesRegisteredAdmissionPolicy(t *testing.T) {
+	if !turso.HasDriver() {
+		t.Skip("libsql driver not available")
+	}
+	for _, policy := range []string{"signature", "nip17", "nip42", "nip29", "ephemeral"} {
+		t.Run(policy, func(t *testing.T) {
+			ctx := context.Background()
+			st, closeFn, err := db.OpenTestStore(ctx, filepath.Join(t.TempDir(), "events.db"), zerolog.Nop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeFn()
+			cfg := config.DefaultConfig()
+			cfg.NIPs.Enabled = []int{1, 42, 29}
+			cfg.NIP42.RequireAuthPublishKinds = []int{30402}
+			srv, err := relay.NewServer(cfg, st, zerolog.Nop(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			relay.RegisterNIP01(srv, st)
+			relay.RegisterNIP17(srv, st)
+			relay.RegisterNIP42(srv, st)
+			relay.RegisterNIP29(srv, st)
+			rt := &recordingRuntime{}
+			srv.SetPluginRuntime(rt)
+			priv, err := btcec.NewPrivateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ev := &nostr.Event{PubKey: hex.EncodeToString(schnorr.SerializePubKey(priv.PubKey())), CreatedAt: time.Now().Unix(), Kind: 1, Tags: [][]string{}, Content: "synthetic"}
+			switch policy {
+			case "nip17":
+				ev.Kind = 1059
+			case "nip42":
+				ev.Kind = 30402
+				ev.Tags = [][]string{{"d", "synthetic"}}
+			case "nip29":
+				ev.Kind = 9007
+				ev.Tags = [][]string{{"h", "synthetic"}}
+			case "ephemeral":
+				ev.Kind = 20001
+			}
+			if err := ev.Sign(priv); err != nil {
+				t.Fatal(err)
+			}
+			if policy == "signature" {
+				ev.Content = "tampered"
+			}
+			sch := NewScheduler(cfg, st, srv, nil, zerolog.Nop())
+			if ok, err := sch.persistImportedEvent(ctx, ev); ok || err == nil {
+				t.Fatalf("policy %s admitted import", policy)
+			}
+			if has, err := st.HasEventID(ctx, ev.ID); err != nil || has {
+				t.Fatalf("rejected event persisted: %t %v", has, err)
+			}
+			if len(rt.ids()) != 0 {
+				t.Fatal("rejected event notified plugins")
+			}
+			ev.Kind, ev.Tags, ev.Content = 1, [][]string{}, "accepted synthetic"
+			if err := ev.Sign(priv); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := sch.persistImportedEvent(ctx, ev); !ok || err != nil {
+				t.Fatalf("public write denied: %t %v", ok, err)
+			}
+		})
 	}
 }
 
