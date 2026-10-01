@@ -365,6 +365,8 @@ func (m *Manager) InstallLocal(src string, enable bool) (*Manifest, error) {
 }
 
 func (m *Manager) upsertConfigItem(man *Manifest, source, sha string, enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.cfg == nil {
 		return
 	}
@@ -398,13 +400,19 @@ func (m *Manager) runInstallHook(ctx context.Context, man *Manifest, pkgDir stri
 
 func (m *Manager) runNamedHook(ctx context.Context, man *Manifest, pkgDir string, args []string, timeout time.Duration, warn string) {
 	dataDir := filepath.Join(pkgDir, "data")
-	settings := ""
-	if item, idx := config.PluginItemByID(m.cfg, man.ID); idx >= 0 {
-		settings = string(item.Settings)
-	}
+	settings := m.hookSettings(man.ID)
 	if err := runManifestHook(ctx, man, pkgDir, dataDir, man.ID, settings, args, timeout); err != nil {
 		m.log.Warn().Err(err).Str("plugin_id", man.ID).Msg(warn)
 	}
+}
+
+func (m *Manager) hookSettings(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if item, idx := config.PluginItemByID(m.cfg, id); idx >= 0 {
+		return string(item.Settings)
+	}
+	return ""
 }
 
 // Enable starts a plugin if installed.
@@ -449,10 +457,7 @@ func (m *Manager) Uninstall(id string, wipeData bool) error {
 	}
 	dataDir := filepath.Join(pkg, "data")
 	man, _ := loadManifest(pkg)
-	settings := ""
-	if item, idx := config.PluginItemByID(m.cfg, id); idx >= 0 {
-		settings = string(item.Settings)
-	}
+	settings := m.hookSettings(id)
 
 	_ = m.Disable(id)
 

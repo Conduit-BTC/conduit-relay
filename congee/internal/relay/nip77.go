@@ -266,7 +266,7 @@ func (s *Server) runNegOpenJob(job *negOpenJob) {
 // Reconciliation must disclose only IDs the connection can read through REQ.
 // Load event metadata in bounded batches rather than retaining every payload.
 func (s *Server) visibleNegSyncItems(ctx context.Context, c *Conn, filter nostr.Filter, items []storage.SyncItem) ([]storage.SyncItem, error) {
-	if !nip29Enabled(s.cfg) || s.relayID == nil {
+	if !nip29Enabled(s.cfg) {
 		return items, nil
 	}
 	const batchSize = 256
@@ -299,6 +299,9 @@ func (s *Server) visibleNegSyncItems(ctx context.Context, c *Conn, filter nostr.
 			ev := byID[item.ID]
 			if ev == nil || ev.CreatedAt != item.CreatedAt || !filter.Matches(ev) {
 				continue // Deleted or changed records cannot disclose stale IDs.
+			}
+			if !nostr.NIP29GroupHTagsValid(ev) {
+				continue // An allowed first group cannot authorize another indexed group.
 			}
 			h := nostr.NIP29GroupHTag(ev)
 			allowed, checked := groupVisibility[h]

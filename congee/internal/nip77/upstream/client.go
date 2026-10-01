@@ -16,7 +16,8 @@ import (
 )
 
 type wsClient struct {
-	conn *websocket.Conn
+	conn     *websocket.Conn
+	fetchSeq uint64
 }
 
 func dialUpstream(ctx context.Context, rawURL string) (*wsClient, error) {
@@ -100,7 +101,9 @@ func (c *wsClient) readMessage(ctx context.Context, timeout time.Duration) (typ 
 }
 
 func (c *wsClient) reqEventByID(ctx context.Context, id string) (*nostr.Event, error) {
-	subID := "fetch-" + id[:8]
+	// Do not reuse IDs: frames queued after CLOSE can outlive a fetch.
+	c.fetchSeq++
+	subID := fmt.Sprintf("fetch-%d", c.fetchSeq)
 	filter := map[string]any{"ids": []string{id}}
 	if err := c.sendJSON([]any{"REQ", subID, filter}); err != nil {
 		return nil, err
@@ -113,6 +116,15 @@ func (c *wsClient) reqEventByID(ctx context.Context, id string) (*nostr.Event, e
 		typ, raw, err := c.readMessage(ctx, 30*time.Second)
 		if err != nil {
 			return nil, err
+		}
+		if typ == "EVENT" || typ == "EOSE" {
+			if len(raw) < 2 {
+				continue
+			}
+			var responseSubID string
+			if err := json.Unmarshal(raw[1], &responseSubID); err != nil || responseSubID != subID {
+				continue
+			}
 		}
 		switch typ {
 		case "EVENT":

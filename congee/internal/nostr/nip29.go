@@ -16,6 +16,25 @@ const (
 	NIP29KindLeaveReq      = 9022
 )
 
+// NIP29GroupHTagsValid reports whether ev names at most one nonempty group.
+// Filters match every h tag, so repeated tags cannot select a single group policy.
+func NIP29GroupHTagsValid(ev *Event) bool {
+	if ev == nil {
+		return true
+	}
+	found := false
+	for _, t := range ev.Tags {
+		if len(t) < 2 || t[0] != "h" || t[1] == "" {
+			continue
+		}
+		if found {
+			return false
+		}
+		found = true
+	}
+	return true
+}
+
 // NIP29GroupHTag returns the first "h" tag value on ev, or empty.
 func NIP29GroupHTag(ev *Event) string {
 	if ev == nil {

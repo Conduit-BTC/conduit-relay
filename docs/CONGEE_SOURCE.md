@@ -21,6 +21,8 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Reconciliation hardening: apply private-group read policy before disclosing event IDs, bound metadata loads, and cancel blocked lookups with the request.
 - Notification hardening: preserve PostgreSQL event notifications with backpressure and release blocked delivery during shutdown.
 - Lifecycle and audit hardening: use collision-safe connection IDs, wait for WebSocket teardown, reclaim expired IP limiter entries, and preserve committed configuration changes when changelog writes fail.
+- Fetch and plugin hardening: match upstream replies to unique subscriptions and synchronize plugin configuration upgrades with relay reads.
+- Group-tag hardening: reject multiple nonempty group tags and hide existing ambiguous events from subscriptions and reconciliation.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.

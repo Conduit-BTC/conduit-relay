@@ -1,16 +1,21 @@
 package plugin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/michmich112/congee/internal/config"
 	"github.com/michmich112/congee/internal/nostr"
+	"github.com/rs/zerolog"
 )
 
 func writePluginPkg(t *testing.T, dir string) {
@@ -24,6 +29,56 @@ func writePluginPkg(t *testing.T, dir string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "bin", "p"), []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstallLocalConcurrentRelayReads(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Plugins.Directory = t.TempDir()
+	m := NewManager(cfg, "", nil, zerolog.Nop())
+	src := filepath.Join(t.TempDir(), "pkg")
+	writePluginPkg(t, src)
+	settings := []byte(`{"preserve":true}`)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					m.Snapshot()
+					m.InterceptREQ(context.Background(), &nostr.ReqMessage{})
+					m.hookSettings("fixture")
+				}
+			}
+		}()
+	}
+	defer func() { close(stop); wg.Wait() }()
+	for i := range 50 {
+		version := fmt.Sprintf("0.0.%d", i+1)
+		manifest := fmt.Sprintf(`{"id":"fixture","name":"Fixture","version":%q,"api_version":1,"exec":{"darwin_arm64":"bin/p"}}`, version)
+		if err := os.WriteFile(filepath.Join(src, "plugin.json"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.InstallLocal(src, false); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := m.ApplySettings(context.Background(), "fixture", settings); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := m.Snapshot()
+		if len(got) != 1 || got[0].Version != version || got[0].Enabled {
+			t.Fatalf("unexpected installed snapshot: %+v", got)
+		}
+		if got := m.hookSettings("fixture"); got != string(settings) {
+			t.Fatalf("install lost settings: %q", got)
+		}
 	}
 }
 

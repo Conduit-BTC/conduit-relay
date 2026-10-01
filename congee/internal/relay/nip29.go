@@ -33,6 +33,12 @@ func RegisterNIP29(s *Server, store storage.Store) {
 	if !nip29Enabled(s.cfg) {
 		return
 	}
+	s.AppendValidator(EventValidatorFunc(func(_ context.Context, _ *Conn, ev *nostr.Event) error {
+		if !nostr.NIP29GroupHTagsValid(ev) {
+			return fmt.Errorf("invalid: nip-29 events may contain only one nonempty h tag")
+		}
+		return nil
+	}))
 	s.AppendValidator(EventValidatorFunc(func(ctx context.Context, conn *Conn, ev *nostr.Event) error {
 		_ = conn
 		return nip29ValidatePrevious(ctx, store, s.cfg, ev)
@@ -323,6 +329,9 @@ func (s *Server) EventVisibleToSubscription(connID string, ev *nostr.Event) bool
 func (s *Server) eventVisibleToSubscription(ctx context.Context, connID string, ev *nostr.Event) bool {
 	if ev == nil {
 		return true
+	}
+	if nip29Enabled(s.cfg) && !nostr.NIP29GroupHTagsValid(ev) {
+		return false
 	}
 	if isGiftWrapKind(ev.Kind) {
 		if !nip17Enabled(s.cfg) {

@@ -5,6 +5,27 @@ import (
 	"testing"
 )
 
+func TestNIP29GroupHTagsValid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ev    *Event
+		valid bool
+	}{
+		{name: "nil", valid: true},
+		{name: "no group", ev: &Event{Tags: [][]string{{"p", "x"}}}, valid: true},
+		{name: "single group", ev: &Event{Tags: [][]string{{"h", "public"}}}, valid: true},
+		{name: "ignore empty tags", ev: &Event{Tags: [][]string{nil, {"h"}, {"h", ""}, {"h", "public"}}}, valid: true},
+		{name: "different groups", ev: &Event{Tags: [][]string{{"h", "public"}, {"h", "private"}}}},
+		{name: "repeated group", ev: &Event{Tags: [][]string{{"h", "public"}, {"h", "public"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NIP29GroupHTagsValid(tc.ev); got != tc.valid {
+				t.Fatalf("valid=%v, want %v", got, tc.valid)
+			}
+		})
+	}
+}
+
 func TestNIP29GroupHTag(t *testing.T) {
 	ev := &Event{Tags: [][]string{{"h", "abc"}, {"p", "x"}}}
 	if g := NIP29GroupHTag(ev); g != "abc" {
