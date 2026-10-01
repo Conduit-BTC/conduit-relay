@@ -52,6 +52,63 @@ class DatabaseAuditTests(unittest.TestCase):
             db.execute("INSERT INTO event_fts VALUES('orphan', 'synthetic')")
         self.assertEqual(audit(self.path)["checks"]["fts_without_mapping"], 1)
 
+    def test_empty_copy_has_zero_counts(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM events")
+            db.execute("DELETE FROM event_fts")
+            db.execute("DELETE FROM event_fts_rowids")
+        result = audit(self.path)
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(all(count == 0 for count in result["checks"].values()))
+
+    def test_combined_passes_match_independent_coverage_queries(self):
+        queries = {
+            "events": "SELECT count(*) FROM events",
+            "fts_rows": "SELECT count(*) FROM event_fts",
+            "mapped_rows": "SELECT count(*) FROM event_fts_rowids",
+            "events_without_mapping": """SELECT count(*) FROM events e
+                LEFT JOIN event_fts_rowids m ON m.event_id=e.id WHERE m.event_id IS NULL""",
+            "mappings_without_event": """SELECT count(*) FROM event_fts_rowids m
+                LEFT JOIN events e ON e.id=m.event_id WHERE e.id IS NULL""",
+            "invalid_mappings": """SELECT count(*) FROM event_fts_rowids m
+                LEFT JOIN event_fts f ON f.rowid=m.fts_rowid
+                WHERE f.rowid IS NULL OR f.event_id IS NOT m.event_id""",
+            "fts_without_mapping": """SELECT count(*) FROM event_fts f
+                LEFT JOIN event_fts_rowids m ON m.fts_rowid=f.rowid WHERE m.event_id IS NULL""",
+            "content_mismatches": """SELECT count(*) FROM event_fts_rowids m
+                JOIN events e ON e.id=m.event_id JOIN event_fts f ON f.rowid=m.fts_rowid
+                WHERE f.content IS NOT e.content""",
+        }
+        with sqlite3.connect(self.path) as db:
+            db.executemany("INSERT INTO events VALUES(?, ?)",
+                           [("missing", "synthetic"), ("missing-fts", None),
+                            ("wrong-id", "synthetic"), ("null-content", None)])
+            db.executemany("INSERT INTO event_fts(event_id, content) VALUES(?, ?)",
+                           [("wrong", "synthetic"), ("orphan", "synthetic"),
+                            ("null-content", "stale")])
+            db.executemany("INSERT INTO event_fts_rowids VALUES(?, ?)",
+                           [("missing-fts", 99), ("wrong-id", 2),
+                            ("missing-event", 3), ("null-content", 4)])
+            db.execute("UPDATE event_fts SET content='stale' WHERE rowid=1")
+            expected = {name: db.execute(query).fetchone()[0] for name, query in queries.items()}
+        result = audit(self.path)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["checks"], expected)
+
+    def test_invalid_cache_budget_fails_closed(self):
+        self.assertEqual(audit(self.path, cache_mib=0)["status"], "failed")
+
+    def test_duplicate_mapping_cannot_inflate_totals_into_a_pass(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("DROP TABLE event_fts_rowids")
+            db.execute("CREATE TABLE event_fts_rowids(event_id TEXT, fts_rowid INTEGER)")
+            db.executemany("INSERT INTO event_fts_rowids VALUES('synthetic', 1)", [(), ()])
+        result = audit(self.path)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["checks"]["events"], 1)
+        self.assertEqual(result["checks"]["fts_rows"], 1)
+        self.assertEqual(result["checks"]["mapped_rows"], 2)
+
     def test_missing_file_is_not_created(self):
         missing = self.path.with_name("missing.db")
         self.assertEqual(audit(missing)["status"], "failed")

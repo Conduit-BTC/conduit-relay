@@ -127,7 +127,18 @@ func migrateFresh(ctx context.Context, db *bun.DB, engine string, log zerolog.Lo
 }
 
 func migrateV1ToV2(ctx context.Context, db *bun.DB, engine string, log zerolog.Logger) error {
-	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// Own rollback synchronously. A canceled transaction context can otherwise
+	// let database/sql return ErrTxDone while its background rollback still
+	// holds libSQL's schema locks. Statements retain the caller's context.
+	return conn.RunInTx(context.WithoutCancel(ctx), nil, func(_ context.Context, tx bun.Tx) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		log.Debug().Msg("schema v1->v2: fts5 and triggers")
 		if err := createFTS5AndTriggers(ctx, tx, engine, log); err != nil {
 			return err
@@ -146,7 +157,7 @@ func migrateV1ToV2(ctx context.Context, db *bun.DB, engine string, log zerolog.L
 				return fmt.Errorf("%s: migrate v1->v2: %w", engine, err)
 			}
 		}
-		return nil
+		return ctx.Err()
 	})
 }
 

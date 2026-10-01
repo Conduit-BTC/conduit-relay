@@ -9,27 +9,29 @@ import sqlite3
 import time
 
 
-CHECKS = {
-    "events": "SELECT count(*) FROM events",
-    "fts_rows": "SELECT count(*) FROM event_fts",
-    "mapped_rows": "SELECT count(*) FROM event_fts_rowids",
-    "events_without_mapping": """SELECT count(*) FROM events e
-        LEFT JOIN event_fts_rowids m ON m.event_id=e.id WHERE m.event_id IS NULL""",
-    "mappings_without_event": """SELECT count(*) FROM event_fts_rowids m
-        LEFT JOIN events e ON e.id=m.event_id WHERE e.id IS NULL""",
-    "invalid_mappings": """SELECT count(*) FROM event_fts_rowids m
-        LEFT JOIN event_fts f ON f.rowid=m.fts_rowid
-        WHERE f.rowid IS NULL OR f.event_id IS NOT m.event_id""",
-    "fts_without_mapping": """SELECT count(*) FROM event_fts f
-        LEFT JOIN event_fts_rowids m ON m.fts_rowid=f.rowid
-        WHERE m.event_id IS NULL""",
-    "content_mismatches": """SELECT count(*) FROM event_fts_rowids m
-        JOIN events e ON e.id=m.event_id JOIN event_fts f ON f.rowid=m.fts_rowid
-        WHERE f.content IS NOT e.content""",
-}
+CHECKS = ("events", "fts_rows", "mapped_rows", "events_without_mapping",
+          "mappings_without_event", "invalid_mappings", "fts_without_mapping",
+          "content_mismatches")
+
+# Check each direction once. Count base rows independently so missing schema
+# constraints cannot inflate all three totals into a false pass.
+PASSES = (
+    (("events", "events_without_mapping"), """SELECT (SELECT count(*) FROM events),
+        coalesce(sum(m.event_id IS NULL), 0) FROM events e
+        LEFT JOIN event_fts_rowids m ON m.event_id=e.id"""),
+    (("mapped_rows", "mappings_without_event", "invalid_mappings", "content_mismatches"),
+     """SELECT (SELECT count(*) FROM event_fts_rowids), coalesce(sum(e.id IS NULL), 0),
+        coalesce(sum(f.rowid IS NULL OR f.event_id IS NOT m.event_id), 0),
+        coalesce(sum(e.id IS NOT NULL AND f.rowid IS NOT NULL AND f.content IS NOT e.content), 0)
+        FROM event_fts_rowids m LEFT JOIN events e ON e.id=m.event_id
+        LEFT JOIN event_fts f ON f.rowid=m.fts_rowid"""),
+    (("fts_rows", "fts_without_mapping"), """SELECT (SELECT count(*) FROM event_fts),
+        coalesce(sum(m.event_id IS NULL), 0) FROM event_fts f
+        LEFT JOIN event_fts_rowids m ON m.fts_rowid=f.rowid"""),
+)
 
 
-def audit(path, max_seconds=600, emit=lambda value: None):
+def audit(path, max_seconds=600, emit=lambda value: None, cache_mib=64):
     deadline = time.monotonic() + max_seconds
     result = {"status": "failed", "checks": {}}
     check = "open"
@@ -39,6 +41,9 @@ def audit(path, max_seconds=600, emit=lambda value: None):
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True,
                                     timeout=min(max_seconds, 5))) as db:
             db.execute("PRAGMA query_only=ON")
+            if not 1 <= cache_mib <= 1024:
+                raise ValueError()
+            db.execute(f"PRAGMA cache_size=-{cache_mib * 1024}")
             db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10000)
             check = "schema_version"
             result["schema_version"] = db.execute("PRAGMA user_version").fetchone()[0]
@@ -54,14 +59,16 @@ def audit(path, max_seconds=600, emit=lambda value: None):
                 return result
             # One read transaction gives all counts the same snapshot.
             db.execute("BEGIN")
-            for check, query in CHECKS.items():
-                count = db.execute(query).fetchone()[0]
-                result["checks"][check] = count
-                emit({check: count})
+            for names, query in PASSES:
+                check = names[0]
+                values = db.execute(query).fetchone()
+                for name, count in zip(names, values):
+                    result["checks"][name] = count
+                    emit({name: count})
             db.rollback()
         counts = result["checks"]
         if (counts["events"] == counts["fts_rows"] == counts["mapped_rows"] and
-                all(counts[name] == 0 for name in list(CHECKS)[3:])):
+                all(counts[name] == 0 for name in CHECKS[3:])):
             result["status"] = "passed"
         else:
             result["failed_check"] = "search_coverage"
@@ -76,11 +83,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("database", type=Path, help="Isolated snapshot copy; never the live database")
     parser.add_argument("--max-seconds", type=int, default=600)
+    parser.add_argument("--cache-mib", type=int, default=64)
     args = parser.parse_args()
-    if not 1 <= args.max_seconds <= 3600:
-        parser.error("--max-seconds must be between 1 and 3600")
+    if not 1 <= args.max_seconds <= 14400:
+        parser.error("--max-seconds must be between 1 and 14400")
+    if not 1 <= args.cache_mib <= 1024:
+        parser.error("--cache-mib must be between 1 and 1024")
     result = audit(args.database, args.max_seconds,
-                   emit=lambda value: print(json.dumps(value), flush=True))
+                   emit=lambda value: print(json.dumps(value), flush=True), cache_mib=args.cache_mib)
     print(json.dumps(result), flush=True)
     return 0 if result["status"] == "passed" else 1
 

@@ -14,7 +14,8 @@ import (
 )
 
 type cancelBackfillHook struct {
-	cancel context.CancelFunc
+	cancel      context.CancelFunc
+	queryPrefix string
 }
 
 func (*cancelBackfillHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
@@ -22,7 +23,7 @@ func (*cancelBackfillHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) c
 }
 
 func (h *cancelBackfillHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
-	if h.cancel != nil && event.Err == nil && strings.HasPrefix(event.Query, "INSERT INTO event_fts(event_id, content) SELECT") {
+	if h.cancel != nil && event.Err == nil && strings.HasPrefix(event.Query, h.queryPrefix) {
 		h.cancel()
 		h.cancel = nil
 	}
@@ -32,8 +33,17 @@ func TestV1BackfillCancellationAndPartialUpgradeCanRetry(t *testing.T) {
 	if !sqlitewriter.HasLibsqlDriver() {
 		t.Skip("libsql driver requires CGO")
 	}
-	for _, partial := range []bool{false, true} {
-		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+	for _, testCase := range []struct {
+		partial     bool
+		queryPrefix string
+	}{
+		{false, "INSERT INTO event_fts(event_id, content) SELECT"},
+		{true, "INSERT INTO event_fts(event_id, content) SELECT"},
+		{false, "PRAGMA user_version = 2"},
+		{true, "PRAGMA user_version = 2"},
+	} {
+		t.Run(fmt.Sprintf("partial=%v/cancel_after=%s", testCase.partial, testCase.queryPrefix), func(t *testing.T) {
+			partial := testCase.partial
 			ctx := context.Background()
 			_, db, err := sqlitewriter.OpenLibsqlHandles(ctx, filepath.Join(t.TempDir(), "v1.db"), zerolog.Nop())
 			if err != nil {
@@ -64,9 +74,9 @@ func TestV1BackfillCancellationAndPartialUpgradeCanRetry(t *testing.T) {
 			}
 			interrupted, cancel := context.WithCancel(ctx)
 			defer cancel()
-			db.AddQueryHook(&cancelBackfillHook{cancel: cancel})
+			db.AddQueryHook(&cancelBackfillHook{cancel: cancel, queryPrefix: testCase.queryPrefix})
 			if err := migrateV1ToV2(interrupted, db, "turso", zerolog.Nop()); !errors.Is(err, context.Canceled) {
-				t.Fatalf("expected cancellation after backfill, got %v", err)
+				t.Fatalf("expected migration cancellation, got %v", err)
 			}
 			var version, ftsExists, mapExists int
 			if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
