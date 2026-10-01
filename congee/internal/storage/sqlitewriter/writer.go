@@ -66,6 +66,7 @@ type Queue struct {
 type task struct {
 	id    uint64
 	label string
+	ctx   context.Context
 	run   func(ctx context.Context, db bun.IDB) error
 	done  chan error
 }
@@ -120,6 +121,9 @@ func (q *Queue) RunWrite(ctx context.Context, label string, run func(ctx context
 	if q.shutdown.Load() {
 		return q.closedErr
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if label == "" {
 		label = "write"
 	}
@@ -127,6 +131,7 @@ func (q *Queue) RunWrite(ctx context.Context, label string, run func(ctx context
 	t := &task{
 		id:    id,
 		label: label,
+		ctx:   ctx,
 		run:   run,
 		done:  make(chan error, 1),
 	}
@@ -172,9 +177,9 @@ func (q *Queue) RunWrite(ctx context.Context, label string, run func(ctx context
 		}
 		return err
 	case <-q.baseCtx.Done():
-		err := <-t.done
-		_ = err
 		return q.closedErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -251,6 +256,10 @@ func (q *Queue) drainOnShutdown() {
 }
 
 func (q *Queue) executeTask(t *task) {
+	ctx, cancel := context.WithCancel(t.ctx)
+	stop := context.AfterFunc(q.baseCtx, cancel)
+	defer stop()
+	defer cancel()
 	queueLen := len(q.writes)
 	q.log.Debug().
 		Str("writer_label", t.label).
@@ -285,31 +294,41 @@ func (q *Queue) executeTask(t *task) {
 		notifyCaller(err)
 	}()
 
-	if pingErr := q.ping(); pingErr != nil {
+	if q.baseCtx.Err() != nil {
+		err = q.closedErr
+		return
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	if pingErr := q.ping(ctx); pingErr != nil {
+		if err = ctx.Err(); err != nil {
+			return
+		}
 		q.log.Warn().
 			Err(pingErr).
 			Str("writer_label", t.label).
 			Uint64("task_id", t.id).
 			Msg("writer pre-task ping failed; attempting reconnect")
-		if reconnErr := q.reconnect(context.Background()); reconnErr != nil {
+		if reconnErr := q.reconnect(ctx); reconnErr != nil {
 			err = fmt.Errorf("%s: ping failed and reconnect failed: ping=%w reconnect=%v", q.engine, pingErr, reconnErr)
 			q.log.Error().Err(err).Str("writer_label", t.label).Uint64("task_id", t.id).Msg("writer reconnect failed")
 			return
 		}
 	}
 
-	err = q.runTaskOnce(t, notifyCaller)
-	if err != nil && isReconnectable(err) {
+	err = q.runTaskOnce(ctx, t, notifyCaller)
+	if err != nil && ctx.Err() == nil && isReconnectable(err) {
 		q.log.Warn().
 			Err(err).
 			Str("writer_label", t.label).
 			Uint64("task_id", t.id).
 			Msg("writer task failed with reconnectable error; retrying after reconnect")
-		if reconnErr := q.reconnect(context.Background()); reconnErr != nil {
+		if reconnErr := q.reconnect(ctx); reconnErr != nil {
 			err = fmt.Errorf("%s: %w (reconnect: %v)", q.engine, err, reconnErr)
 			return
 		}
-		err = q.runTaskOnce(t, notifyCaller)
+		err = q.runTaskOnce(ctx, t, notifyCaller)
 	}
 
 	dur := time.Since(start)
@@ -333,9 +352,12 @@ func (q *Queue) executeTask(t *task) {
 		Msg("writer task completed")
 }
 
-func (q *Queue) runTaskOnce(t *task, notifyCaller func(error)) error {
-	runCtx, cancel := context.WithTimeout(context.Background(), q.taskTimeout)
+func (q *Queue) runTaskOnce(ctx context.Context, t *task, notifyCaller func(error)) error {
+	runCtx, cancel := context.WithTimeout(ctx, q.taskTimeout)
 	defer cancel()
+	if err := runCtx.Err(); err != nil {
+		return err
+	}
 	q.dbMu.RLock()
 	db := q.db
 	q.dbMu.RUnlock()
@@ -372,12 +394,13 @@ func (q *Queue) runTaskOnce(t *task, notifyCaller func(error)) error {
 	case res := <-done:
 		return res.err
 	case <-runCtx.Done():
-		notifyCaller(context.DeadlineExceeded)
+		err := runCtx.Err()
+		notifyCaller(err)
 		q.log.Warn().
 			Str("writer_label", t.label).
 			Uint64("task_id", t.id).
 			Dur("task_timeout", q.taskTimeout).
-			Msg("writer task hard timeout; waiting for in-flight sqlite call before reconnect")
+			Msg("writer task canceled; waiting for in-flight sqlite call")
 
 		waitCtx, waitCancel := context.WithTimeout(context.Background(), reconnectTimeout)
 		defer waitCancel()
@@ -391,7 +414,12 @@ func (q *Queue) runTaskOnce(t *task, notifyCaller func(error)) error {
 			<-done
 		}
 
-		reconnCtx, reconnCancel := context.WithTimeout(context.Background(), reconnectTimeout)
+		// Caller cancellation and shutdown do not require replacing a healthy
+		// handle. Keep hard-timeout recovery only while the caller and queue live.
+		if ctx.Err() != nil {
+			return err
+		}
+		reconnCtx, reconnCancel := context.WithTimeout(ctx, reconnectTimeout)
 		defer reconnCancel()
 		if reconnErr := q.reconnect(reconnCtx); reconnErr != nil {
 			q.log.Error().
@@ -400,11 +428,11 @@ func (q *Queue) runTaskOnce(t *task, notifyCaller func(error)) error {
 				Uint64("task_id", t.id).
 				Msg("writer reconnect after hard timeout failed")
 		}
-		return context.DeadlineExceeded
+		return err
 	}
 }
 
-func (q *Queue) ping() error {
+func (q *Queue) ping(parent context.Context) error {
 	q.dbMu.RLock()
 	sqldb := q.sqldb
 	q.dbMu.RUnlock()
@@ -417,7 +445,7 @@ func (q *Queue) ping() error {
 	if stats.MaxOpenConnections > 0 && stats.InUse >= stats.MaxOpenConnections {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	err := sqldb.PingContext(ctx)
 	if errors.Is(err, context.DeadlineExceeded) {

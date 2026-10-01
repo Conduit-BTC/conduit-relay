@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +12,62 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/michmich112/congee/internal/nip77"
 	"github.com/michmich112/congee/internal/nostr"
 	"github.com/michmich112/congee/internal/storage"
 	"github.com/rs/zerolog"
 )
+
+func TestNEGOpenProtectedKindChallengesThenAuthenticates(t *testing.T) {
+	srv, st := newNegReservationServer(t, 32, nil)
+	srv.cfg.NIPs.Enabled = append(srv.cfg.NIPs.Enabled, 42)
+	srv.cfg.NIP42.RelayURL = "wss://relay.example/"
+	srv.cfg.NIP42.RequireAuthSubscribeKinds = []int{1}
+	c := newTestNegConn(t, srv, 100, 100)
+	negReservationOpen(t, srv, c, "protected")
+	challenge := negReservationReply(t, c)
+	if len(challenge) != 2 || challenge[0] != "AUTH" || challenge[1] == "" {
+		t.Fatalf("missing AUTH challenge: %v", challenge)
+	}
+	rejection := negReservationReply(t, c)
+	if rejection[0] != "NEG-ERR" || !strings.HasPrefix(rejection[2].(string), "auth-required:") {
+		t.Fatalf("unexpected unauthenticated response: %v", rejection)
+	}
+	if st.calls.Load() != 0 || srv.negActiveSessions.Load() != 0 {
+		t.Fatal("unauthenticated NEG-OPEN reached storage or reserved capacity")
+	}
+	// Repeated rejection must retain the same challenge without sending it again.
+	negReservationOpen(t, srv, c, "protected")
+	if reply := negReservationReply(t, c); reply[0] != "NEG-ERR" {
+		t.Fatalf("challenge was sent twice: %v", reply)
+	}
+	priv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := nostr.Event{
+		PubKey: hex.EncodeToString(priv.PubKey().SerializeCompressed()[1:]),
+		Kind:   nip42AuthEventKind, CreatedAt: time.Now().Unix(),
+		Tags: [][]string{{"relay", srv.cfg.NIP42.RelayURL}, {"challenge", challenge[1].(string)}},
+	}
+	if err := ev.Sign(priv); err != nil {
+		t.Fatal(err)
+	}
+	if err := handleNIP42AUTH(c.ctx, srv, c, &nostr.AuthMessage{Event: ev}); err != nil {
+		t.Fatal(err)
+	}
+	if reply := negReservationReply(t, c); reply[0] != "OK" || reply[2] != true {
+		t.Fatalf("challenge could not authenticate: %v", reply)
+	}
+	negReservationOpen(t, srv, c, "protected")
+	negReservationStarted(t, st)
+	st.release <- struct{}{}
+	if reply := negReservationReply(t, c); reply[0] != "NEG-MSG" {
+		t.Fatalf("authenticated retry failed: %v", reply)
+	}
+	c.negSessions.closeAll()
+}
 
 // The first real queue job blocks in storage, leaving later NEG-OPENs pending.
 type negReservationStore struct {

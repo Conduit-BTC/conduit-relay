@@ -110,6 +110,39 @@ func TestInitiateShutdownIdempotent(t *testing.T) {
 	}
 }
 
+func TestSubscriptionEnqueueFailureClosesConnection(t *testing.T) {
+	t.Parallel()
+	c, client, cleanup := testConnWithPipe(t)
+	defer cleanup()
+	for i := 0; i < cap(c.send); i++ {
+		if !c.enqueueSubscriptionFrame([]byte("frame")) {
+			t.Fatal("available queue rejected subscription frame")
+		}
+	}
+	if c.enqueueSubscriptionFrame([]byte("CLOSED")) {
+		t.Fatal("full queue accepted subscription frame")
+	}
+	if c.ctx.Err() != context.Canceled {
+		t.Fatal("failed subscription delivery did not cancel connection")
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := client.Read(make([]byte, 1))
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("failed subscription delivery left transport open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed subscription delivery did not unblock transport")
+	}
+	if c.enqueueSubscriptionFrame([]byte("later")) {
+		t.Fatal("closed connection accepted later frame")
+	}
+}
+
 func TestSweepIdleConnectionsInitiatesShutdown(t *testing.T) {
 	t.Parallel()
 	c, _, cleanup := testConnWithPipe(t)

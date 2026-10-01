@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -222,27 +223,87 @@ func TestBroadcastBuffersUntilFinishSnapshot(t *testing.T) {
 	}
 }
 
-func TestBroadcastSnapshotOverflowStopsBuffering(t *testing.T) {
+func TestBroadcastSnapshotOverflowClosesGenerationAndAllowsRetry(t *testing.T) {
 	cfg := minimalRelayCfg()
 	m := NewSubscriptionManager(cfg, zerolog.Nop())
 
-	var sent atomic.Int64
+	var sent [][]byte
 	m.RegisterSender("c1", func(b []byte) bool {
-		sent.Add(1)
+		sent = append(sent, b)
 		return true
 	})
 	if err := m.Add("c1", "s1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < pendingLiveCap+10; i++ {
+	generation, ok := m.SubGeneration("c1", "s1")
+	if !ok {
+		t.Fatal("missing snapshot generation")
+	}
+	entry := m.subs["c1"]["s1"]
+	for i := 0; i < pendingLiveCap; i++ {
 		ev := &nostr.Event{ID: fmt.Sprintf("%064d", i), PubKey: strings.Repeat("2", 64), Kind: 1, Content: "x"}
 		m.Broadcast(ev, nil)
 	}
-
+	if len(sent) != 0 || !m.IsSameSnapshot("c1", "s1", generation) {
+		t.Fatal("buffer at capacity must remain open without sending")
+	}
+	ev := &nostr.Event{ID: strings.Repeat("a", 64), PubKey: strings.Repeat("2", 64), Kind: 1, Content: "x"}
+	m.Broadcast(ev, nil)
+	if len(sent) != 1 {
+		t.Fatalf("want exactly one overflow notice, got %d", len(sent))
+	}
+	var closed []string
+	if err := json.Unmarshal(sent[0], &closed); err != nil {
+		t.Fatal(err)
+	}
+	if len(closed) != 3 || closed[0] != "CLOSED" || closed[1] != "s1" ||
+		!strings.HasPrefix(closed[2], "error:") || !strings.Contains(closed[2], "retry") {
+		t.Fatalf("invalid overflow notice: %q", closed)
+	}
+	if m.SubCount("c1") != 0 || m.IsSameSnapshot("c1", "s1", generation) || len(entry.pendingLive) != 0 {
+		t.Fatal("overflow did not invalidate and release the snapshot")
+	}
+	if m.withSnapshot("c1", "s1", generation, func(*subEntry) { t.Fatal("stale snapshot can still send") }) {
+		t.Fatal("stale snapshot accepted")
+	}
 	m.FinishSnapshot("c1", "s1")
-	if sent.Load() != pendingLiveCap {
-		t.Fatalf("expected %d buffered events flushed, got %d", pendingLiveCap, sent.Load())
+	m.Broadcast(ev, nil)
+	if len(sent) != 1 {
+		t.Fatal("closed snapshot continued sending events")
+	}
+	if err := m.Add("c1", "s1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if m.withSnapshot("c1", "s1", generation, func(*subEntry) { t.Fatal("stale snapshot affected replacement") }) {
+		t.Fatal("old generation matched replacement")
+	}
+	m.FinishSnapshot("c1", "s1")
+	m.Broadcast(ev, nil)
+	if len(sent) != 2 || !strings.HasPrefix(string(sent[1]), `["EVENT","s1",`) {
+		t.Fatal("replacement subscription did not resume live events")
+	}
+}
+
+func TestBroadcastSnapshotOverflowFailedNoticeStillInvalidatesGeneration(t *testing.T) {
+	m := NewSubscriptionManager(minimalRelayCfg(), zerolog.Nop())
+	var attempted atomic.Int64
+	m.RegisterSender("c1", func([]byte) bool {
+		attempted.Add(1)
+		return false
+	})
+	if err := m.Add("c1", "s1", []nostr.Filter{{Kinds: []int{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	generation, _ := m.SubGeneration("c1", "s1")
+	entry := m.subs["c1"]["s1"]
+	ev := &nostr.Event{ID: strings.Repeat("a", 64), PubKey: strings.Repeat("2", 64), Kind: 1}
+	for i := 0; i < pendingLiveCap+2; i++ {
+		m.Broadcast(ev, nil)
+	}
+	m.FinishSnapshot("c1", "s1")
+	if attempted.Load() != 1 || m.IsSameSnapshot("c1", "s1", generation) || len(entry.pendingLive) != 0 {
+		t.Fatal("failed CLOSED enqueue retained the overflowed snapshot")
 	}
 }
 

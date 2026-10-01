@@ -121,6 +121,11 @@ func handleNEGOpen(ctx context.Context, s *Server, c *Conn, msg *nostr.NegOpenMe
 		return s.sendNegBlocked(c, subID, "blocked: relay busy")
 	}
 	if err := validateNegFilter(s.cfg, c, &msg.Filter); err != nil {
+		if strings.HasPrefix(err.Error(), "auth-required:") {
+			if err := nip42EnqueueAuthChallenge(c, s.cfg); err != nil {
+				return err
+			}
+		}
 		return s.sendNegBlocked(c, subID, err.Error())
 	}
 

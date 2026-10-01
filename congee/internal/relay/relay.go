@@ -41,7 +41,7 @@ type Server struct {
 	conns        sync.Map // conn id -> *Conn
 	ipOpen       *ipConnTracker
 	connWG       sync.WaitGroup
-	connMu       sync.Mutex // serializes admission and registration with shutdown
+	connMu       sync.Mutex // serializes worker startup, admission and registration with shutdown
 	shuttingDown bool
 
 	metrics       *RelayMetrics
@@ -120,8 +120,9 @@ func NewServer(cfg *config.Config, store storage.Store, log zerolog.Logger, rela
 	s.http = &http.Server{
 		Handler: s.routes(),
 		// Hijacked WebSocket connections manage their own deadlines.
-		ReadTimeout:  0,
-		WriteTimeout: 0,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
 	}
 	return s, nil
 }
@@ -232,6 +233,14 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // Serve runs the HTTP server on an existing listener (e.g. :0 in tests).
 func (s *Server) Serve(ln net.Listener) error {
+	// Queue startup adds workers to WaitGroups. Complete every Add before
+	// shutdown can mark the server stopping and wait for those workers.
+	s.connMu.Lock()
+	if s.shuttingDown {
+		s.connMu.Unlock()
+		_ = ln.Close()
+		return http.ErrServerClosed
+	}
 	s.serveOnce.Do(func() {
 		s.startedUnix.Store(time.Now().Unix())
 		if s.metrics != nil && s.store != nil {
@@ -244,6 +253,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		s.readQueue.start()
 	})
 	s.http.Addr = ln.Addr().String()
+	s.connMu.Unlock()
 	return s.http.Serve(ln)
 }
 
@@ -477,9 +487,7 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 		Int("idle_no_event_no_sub_seconds", s.cfg.ConnectionLimits.IdleNoEventNoSubSeconds).
 		Msg("ws client connected")
 
-	s.subs.RegisterSender(id, func(b []byte) bool {
-		return c.enqueue(b) == nil
-	})
+	s.subs.RegisterSender(id, c.enqueueSubscriptionFrame)
 
 	go c.writeLoop()
 	if config.NIP11AuthRequired(s.cfg) {

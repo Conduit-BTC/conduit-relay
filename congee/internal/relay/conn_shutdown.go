@@ -6,6 +6,17 @@ import (
 
 const connShutdownWriterWait = 5 * time.Second
 
+// enqueueSubscriptionFrame closes a slow connection when its subscription
+// frames cannot be delivered. The client must reconnect rather than silently
+// retain a subscription that the server already closed.
+func (c *Conn) enqueueSubscriptionFrame(frame []byte) bool {
+	if err := c.enqueue(frame); err != nil {
+		c.initiateShutdown()
+		return false
+	}
+	return true
+}
+
 // initiateShutdown forcefully stops a WebSocket client attachment. It is safe to
 // call from any goroutine and idempotent (sync.Once).
 //

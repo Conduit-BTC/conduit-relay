@@ -39,7 +39,6 @@ type subEntry struct {
 
 	snapshotDone atomic.Bool
 	pendingLive  [][]byte
-	overflow     atomic.Bool
 }
 
 // SubscriptionManager tracks REQ subscriptions per connection and broadcasts events.
@@ -209,7 +208,17 @@ func (m *SubscriptionManager) Broadcast(ev *nostr.Event, visible func(connID str
 			}
 			if !entry.snapshotDone.Load() {
 				if len(entry.pendingLive) >= pendingLiveCap {
-					entry.overflow.Store(true)
+					// A partial live stream must not look like a complete snapshot.
+					// Invalidate this generation before any old page can emit EOSE.
+					entry.pendingLive = nil
+					m.removeLocked(connID, sub.subID)
+					closed, err := nostr.MarshalRelayClosed(sub.subID, "error: live event buffer overflow; retry subscription")
+					if err != nil || !send(closed) {
+						m.relayLog.Warn().Str("conn_id", connID).Str("sub_id", sub.subID).
+							Msg("snapshot overflow CLOSED send failed")
+					}
+					m.relayLog.Warn().Str("conn_id", connID).Str("sub_id", sub.subID).
+						Int("cap", pendingLiveCap).Msg("subscription closed: snapshot live buffer overflow")
 				} else {
 					entry.pendingLive = append(entry.pendingLive, b)
 				}
@@ -339,11 +348,6 @@ func (m *SubscriptionManager) finishSnapshotLocked(connID, subID string, e *subE
 	e.snapshotDone.Store(true)
 	pending := e.pendingLive
 	e.pendingLive = nil
-	if e.overflow.Load() {
-		m.relayLog.Warn().Str("conn_id", connID).Str("sub_id", subID).
-			Int("cap", pendingLiveCap).
-			Msg("live events dropped during REQ snapshot: pending buffer overflow")
-	}
 	send := m.senders[connID]
 	if send == nil {
 		return
