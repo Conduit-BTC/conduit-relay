@@ -11,6 +11,7 @@ import (
 	"github.com/michmich112/congee/internal/nipmeta"
 	"github.com/michmich112/congee/internal/nips"
 	"github.com/michmich112/congee/internal/storage"
+	"github.com/rs/zerolog"
 )
 
 type nipRow struct {
@@ -65,7 +66,7 @@ func handleNIPsGet(cfgPath string) http.HandlerFunc {
 	}
 }
 
-func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, scheduleRestart func()) http.HandlerFunc {
+func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log zerolog.Logger, scheduleRestart func()) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -133,18 +134,19 @@ func handleNIPsPatch(cfgPath string, cfgMu *sync.Mutex, st storage.Store, schedu
 			return
 		}
 		summary := "PATCH /api/nips"
-		if err := config.SaveConfigChange(r.Context(), st, summary, string(body)); err != nil {
-			http.Error(w, `{"error":"changelog write failed"}`, http.StatusInternalServerError)
-			return
-		}
+		auditWarning := recordCommittedConfigChange(r.Context(), st, log, summary, string(body))
 		if scheduleRestart != nil {
 			go scheduleRestartSoon(scheduleRestart)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		result := map[string]any{
 			"ok":               true,
 			"restart_required": true,
 			"restarting":       scheduleRestart != nil,
-		})
+		}
+		if auditWarning != "" {
+			result["audit_warning"] = auditWarning
+		}
+		_ = json.NewEncoder(w).Encode(result)
 	}
 }

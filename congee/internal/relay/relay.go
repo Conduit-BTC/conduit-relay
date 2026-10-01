@@ -36,10 +36,12 @@ type Server struct {
 
 	http *http.Server
 
-	open   atomic.Int64
-	conns  sync.Map // conn id -> *Conn
-	ipOpen *ipConnTracker
-	connWG sync.WaitGroup
+	open         atomic.Int64
+	conns        sync.Map // conn id -> *Conn
+	ipOpen       *ipConnTracker
+	connWG       sync.WaitGroup
+	connMu       sync.Mutex // serializes admission and registration with shutdown
+	shuttingDown bool
 
 	metrics       *RelayMetrics
 	metricsCtx    context.Context
@@ -370,7 +372,15 @@ func (s *Server) acceptWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Track the connection before the upgrade removes it from HTTP shutdown tracking.
+	s.connMu.Lock()
+	if s.shuttingDown {
+		s.connMu.Unlock()
+		s.ipOpen.release(peer)
+		http.Error(w, "relay shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	s.connWG.Add(1)
+	s.connMu.Unlock()
 	nc, useFlate, err := s.upgradeConn(w, r)
 	if err != nil {
 		s.connWG.Done()
@@ -440,6 +450,10 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 		startedUnix: time.Now().Unix(),
 		negSessions: newNegSessionMap(),
 	}
+	s.registerConnection(c)
+	id = c.ID
+	c.log = s.log.With().Str("conn_id", id).Logger()
+	defer s.conns.Delete(id)
 	c.initIdleClock()
 	c.log.Info().
 		Str("peer_ip", resolvedPeerIP).
@@ -449,9 +463,6 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 		Int("max_open_per_ip", s.cfg.ConnectionLimits.MaxOpenPerIP).
 		Int("idle_no_event_no_sub_seconds", s.cfg.ConnectionLimits.IdleNoEventNoSubSeconds).
 		Msg("ws client connected")
-
-	s.conns.Store(id, c)
-	defer s.conns.Delete(id)
 
 	s.subs.RegisterSender(id, func(b []byte) bool {
 		return c.enqueue(b) == nil
@@ -482,8 +493,27 @@ func (s *Server) serveWS(nc net.Conn, r *http.Request, resolvedPeerIP string, us
 	}
 }
 
-// Shutdown stops listening and closes active WebSocket connections.
+// registerConnection never replaces another client's registry entry.
+func (s *Server) registerConnection(c *Conn) {
+	s.connMu.Lock()
+	for {
+		if _, loaded := s.conns.LoadOrStore(c.ID, c); !loaded {
+			break
+		}
+		c.ID = newConnID()
+	}
+	stopping := s.shuttingDown
+	s.connMu.Unlock()
+	if stopping {
+		c.initiateShutdown()
+	}
+}
+
+// Shutdown stops listening and waits for WebSocket teardown, including session persistence.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.connMu.Lock()
+	s.shuttingDown = true
+	s.connMu.Unlock()
 	// Queue jobs use connection contexts. Cancel them before waiting for active
 	// storage work to finish, so a blocked query cannot hold up shutdown.
 	s.conns.Range(func(_, v any) bool {
@@ -500,11 +530,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.metricsCancel()
 	}
 	if s.metrics != nil && s.store != nil {
-		_ = s.metrics.FlushOpenMinute(context.Background(), s.store, func() int {
+		_ = s.metrics.FlushOpenMinute(ctx, s.store, func() int {
 			return s.subs.TotalSubscriptions()
 		})
 	}
-	return s.http.Shutdown(ctx)
+	if err := s.http.Shutdown(ctx); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		s.connWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func peerIP(remote string) string {

@@ -20,6 +20,7 @@ The imported source uses the upstream MIT license. Its module path remains uncha
 - Import and group hardening: validate fetched upstream events against the sync filter, deliver imports to local subscriptions, and reject group writes when metadata lookup fails.
 - Reconciliation hardening: apply private-group read policy before disclosing event IDs, bound metadata loads, and cancel blocked lookups with the request.
 - Notification hardening: preserve PostgreSQL event notifications with backpressure and release blocked delivery during shutdown.
+- Lifecycle and audit hardening: use collision-safe connection IDs, wait for WebSocket teardown, reclaim expired IP limiter entries, and preserve committed configuration changes when changelog writes fail.
 - Admin dependency lock: compatible dependency updates remove known high-severity build-tool findings.
 
 This baseline includes replaceable revision ordering and NIP-50 ranking. The search index uses schema version 8 with the `event_fts_rowids` mapping. Do not combine this release with another upstream migration that also claims version 8. Startup rejects incompatible schema-8 search tables, indexes, or triggers.
@@ -95,6 +96,10 @@ The Congee workflow runs fresh PostgreSQL startup and migration rollback regress
 No workflow deploys to Fly automatically. The release handoff must identify the operator, reviewed SHA, image digest, rehearsal evidence, and rollback image digest.
 
 Before cutover, rehearse against an independent consistent copy of the event and metadata databases. Keep the copy and configuration private. Check schema version, FTS rowid mapping and triggers, row counts, integrity, search updates, deletion, and startup configuration compatibility. Preserve the relay identity. Do not test a replacement binary against the live database.
+
+Run `python3 scripts/congee-db-audit.py /path/to/isolated/events.db` on the isolated event database before and after candidate startup. The audit opens SQLite read-only and emits only status and counts. It rejects missing events, orphan search rows, incorrect rowid mappings, and stale indexed content. It uses a ten-minute deadline by default. A timeout is a failed gate, not a partial pass. This audit does not verify FTS postings, plugin indexes, database migration compatibility, or application behavior; complete the image rehearsal too.
+
+Preserve the installed plugin package and its index during this source-baseline rollout. Do not combine the rollout with a plugin update, index rebuild, or remote re-ingestion. Plugin health only proves process readiness. It does not prove index coverage. Timestamp-only backfill can skip timestamp ties, and a descending watermark does not recover newer events missed during downtime. Require a separate reviewed recovery change and coverage checks before rebuilding a plugin index.
 
 Stop if the rehearsal fails, the schema-8 layout differs, identity changes, required NIPs disappear, or any protected message is visible to an unauthorized reader. Reverting the image is safe only after verifying that its schema is compatible with the persisted data. Escalate an incompatible database to a maintainer.
 

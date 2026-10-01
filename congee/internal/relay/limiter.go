@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"container/list"
 	"sync"
 	"time"
 
@@ -81,37 +82,59 @@ func (b *byteWindow) allow(n int) bool {
 // ipWindows holds per-IP sliding windows shared across connections.
 type ipWindows struct {
 	mu          sync.Mutex
-	messages    map[string]*slidingEvents
-	connections map[string]*slidingEvents
+	messages    ipWindowSet
+	connections ipWindowSet
+}
+
+type ipWindowSet struct {
+	entries map[string]*list.Element
+	order   list.List
+}
+
+type ipWindow struct {
+	ip       string
+	lastSeen time.Time
+	limiter  *slidingEvents
 }
 
 func newIPWindows() *ipWindows {
 	return &ipWindows{
-		messages:    make(map[string]*slidingEvents),
-		connections: make(map[string]*slidingEvents),
+		messages:    ipWindowSet{entries: make(map[string]*list.Element)},
+		connections: ipWindowSet{entries: make(map[string]*list.Element)},
 	}
 }
 
-func (w *ipWindows) messageWindow(ip string, maxPerMinute int) *slidingEvents {
+func (w *ipWindows) allow(set *ipWindowSet, ip string, maxPerMinute int) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if x, ok := w.messages[ip]; ok {
-		return x
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	// Bound cleanup work per admission. Last use orders the queue, so an
+	// unexpired entry also protects every entry after it from eviction.
+	for n := 0; n < 64; n++ {
+		e := set.order.Front()
+		if e == nil {
+			break
+		}
+		x := e.Value.(*ipWindow)
+		if !x.lastSeen.Before(cutoff) {
+			break
+		}
+		delete(set.entries, x.ip)
+		set.order.Remove(e)
 	}
-	x := newSlidingEvents(time.Minute, maxPerMinute)
-	w.messages[ip] = x
-	return x
-}
-
-func (w *ipWindows) connectionWindow(ip string, maxPerMinute int) *slidingEvents {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if x, ok := w.connections[ip]; ok {
-		return x
+	if e, ok := set.entries[ip]; ok {
+		x := e.Value.(*ipWindow)
+		allowed := x.limiter.allow()
+		x.lastSeen = time.Now()
+		set.order.MoveToBack(e)
+		return allowed
 	}
-	x := newSlidingEvents(time.Minute, maxPerMinute)
-	w.connections[ip] = x
-	return x
+	x := &ipWindow{ip: ip, limiter: newSlidingEvents(time.Minute, maxPerMinute)}
+	allowed := x.limiter.allow()
+	x.lastSeen = time.Now()
+	set.entries[ip] = set.order.PushBack(x)
+	return allowed
 }
 
 // ConnLimiter is per-WebSocket-connection rate state.
@@ -154,12 +177,12 @@ func NewLimiterHub(cfg *config.Config) *Hub {
 
 // AllowNewConnection reports whether a new TCP/WebSocket from ip is allowed.
 func (h *Hub) AllowNewConnection(ip string) bool {
-	return h.ip.connectionWindow(ip, h.cfg.ConnectionLimits.ConnectionsPerMinutePerIP).allow()
+	return h.ip.allow(&h.ip.connections, ip, h.cfg.ConnectionLimits.ConnectionsPerMinutePerIP)
 }
 
 // AllowMessage counts one inbound message toward the IP cap (all WS messages).
 func (h *Hub) AllowMessage(ip string) bool {
-	return h.ip.messageWindow(ip, h.cfg.RateLimits.MessagesPerMinutePerIP).allow()
+	return h.ip.allow(&h.ip.messages, ip, h.cfg.RateLimits.MessagesPerMinutePerIP)
 }
 
 // NewConnLimiter returns a new per-connection limiter.

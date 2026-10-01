@@ -73,7 +73,7 @@ type Conn struct {
 }
 
 func newConnID() string {
-	var b [4]byte
+	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }

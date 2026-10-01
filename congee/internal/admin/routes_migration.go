@@ -154,46 +154,44 @@ func openMigrationSource(ctx context.Context, dbType, dsn, congeeInstanceID stri
 
 // applyPostMigrationDatabaseConfig updates database.type and database.dsn in the JSON config
 // to match the migration target, records a changelog row on the running relay meta store, and
-// returns whether the running relay must restart to pick up the new file.
-func applyPostMigrationDatabaseConfig(ctx context.Context, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, target migrationEndpoint) (restartNeeded bool, err error) {
+// returns whether the running relay must restart, any audit warning, and pre-commit errors.
+func applyPostMigrationDatabaseConfig(ctx context.Context, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, target migrationEndpoint, log zerolog.Logger) (restartNeeded bool, auditWarning string, err error) {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
 
 	prev, _ := os.ReadFile(cfgPath)
 	cfg, err := config.LoadJSON(cfgPath)
 	if err != nil {
-		return false, fmt.Errorf("load config: %w", err)
+		return false, "", fmt.Errorf("load config: %w", err)
 	}
 
 	dbType := migrationCanonicalDBType(target.Type)
 	switch dbType {
 	case "postgres", "turso":
 	default:
-		return false, fmt.Errorf("unsupported target type %q", target.Type)
+		return false, "", fmt.Errorf("unsupported target type %q", target.Type)
 	}
 	cfg.Database.Type = dbType
 	cfg.Database.DSN = strings.TrimSpace(target.DSN)
 	if err := cfg.Validate(); err != nil {
-		return false, err
+		return false, "", err
 	}
 
-	needRestart := configRestartNeeded(prev, cfg)
-	if err := config.WriteConfigAtomic(cfgPath, cfg); err != nil {
-		return false, err
-	}
 	dbJSON, err := json.Marshal(cfg.Database)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	diff := "database=" + string(dbJSON)
 	if len(prev) > 0 {
 		diff = "previous_bytes=" + strconv.Itoa(len(prev)) + "\n" + diff
 	}
-	summary := "POST /api/migration/start: database set to " + dbType
-	if err := config.SaveConfigChange(ctx, meta, summary, diff); err != nil {
-		return false, fmt.Errorf("changelog on meta store: %w", err)
+	needRestart := configRestartNeeded(prev, cfg)
+	if err := config.WriteConfigAtomic(cfgPath, cfg); err != nil {
+		return false, "", err
 	}
-	return needRestart, nil
+	summary := "POST /api/migration/start: database set to " + dbType
+	auditWarning = recordCommittedConfigChange(ctx, meta, log, summary, diff)
+	return needRestart, auditWarning, nil
 }
 
 func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex, meta storage.MetaStore, scheduleRestart func()) http.HandlerFunc {
@@ -311,10 +309,11 @@ func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex,
 		l.Debug().Msg("migration finished ok")
 
 		var restartNeeded bool
+		var auditWarning string
 		var cfgErr error
 		if req.MakeTargetPrimary {
 			l.Debug().Msg("make_target_primary: updating config file to target database")
-			restartNeeded, cfgErr = applyPostMigrationDatabaseConfig(ctx, cfgPath, cfgMu, meta, req.Target)
+			restartNeeded, auditWarning, cfgErr = applyPostMigrationDatabaseConfig(ctx, cfgPath, cfgMu, meta, req.Target, l)
 			if cfgErr != nil {
 				l.Warn().Err(cfgErr).Msg("migration copy ok but config update failed")
 			} else if restartNeeded && scheduleRestart != nil {
@@ -336,6 +335,9 @@ func handleMigrationStart(log zerolog.Logger, cfgPath string, cfgMu *sync.Mutex,
 		}
 		if cfgErr != nil {
 			done["config_error"] = cfgErr.Error()
+		}
+		if auditWarning != "" {
+			done["audit_warning"] = auditWarning
 		}
 		send("done", done)
 	}

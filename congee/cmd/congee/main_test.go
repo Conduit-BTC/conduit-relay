@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -22,6 +23,76 @@ import (
 func TestListenerFailureHelper(t *testing.T) {
 	if os.Getenv("CONGEE_TEST_LISTENER_FAILURE") == "1" {
 		main()
+	}
+}
+
+func TestShutdownFailureHelper(t *testing.T) {
+	server := os.Getenv("CONGEE_TEST_SHUTDOWN_FAILURE")
+	if server == "" {
+		return
+	}
+	marker := os.Getenv("CONGEE_TEST_SHUTDOWN_MARKER")
+	defer func() { _ = os.WriteFile(marker+"-storage-closed", nil, 0600) }()
+	log := zerolog.New(os.Stderr)
+	if os.Getenv("CONGEE_TEST_SHUTDOWN_LOG_DISABLED") == "1" {
+		log = zerolog.Nop()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	shutdownOrExit(ctx, server, func(ctx context.Context) error { return ctx.Err() }, log)
+	_ = os.WriteFile(marker+"-replacement-started", nil, 0600)
+}
+
+func TestShutdownFailureExitsWithoutClosingStorageOrRestarting(t *testing.T) {
+	for _, server := range []string{"relay", "admin"} {
+		for _, disabled := range []bool{false, true} {
+			t.Run(server+"/logging-disabled="+strconv.FormatBool(disabled), func(t *testing.T) {
+				dir := t.TempDir()
+				marker := filepath.Join(dir, "shutdown")
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestShutdownFailureHelper$")
+				cmd.Dir = dir
+				cmd.Env = []string{
+					"CONGEE_TEST_SHUTDOWN_FAILURE=" + server,
+					"CONGEE_TEST_SHUTDOWN_MARKER=" + marker,
+				}
+				if disabled {
+					cmd.Env = append(cmd.Env, "CONGEE_TEST_SHUTDOWN_LOG_DISABLED=1")
+				}
+				output, err := cmd.CombinedOutput()
+				if ctx.Err() != nil {
+					t.Fatalf("failed shutdown did not terminate: %v", ctx.Err())
+				}
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+					t.Fatalf("failed shutdown must exit 1: err=%v output=%s", err, output)
+				}
+				for _, suffix := range []string{"-storage-closed", "-replacement-started"} {
+					if _, err := os.Stat(marker + suffix); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("failed shutdown reached unsafe path %s: %v", suffix, err)
+					}
+				}
+				if !disabled && (!strings.Contains(string(output), `"server":"`+server+`"`) || !strings.Contains(string(output), "shutdown failed; exiting without closing storage or restarting")) {
+					t.Fatalf("missing shutdown failure diagnostic: %s", output)
+				}
+			})
+		}
+	}
+}
+
+func TestSuccessfulShutdownReturnsAfterTeardown(t *testing.T) {
+	ctx := context.Background()
+	finished := false
+	shutdownOrExit(ctx, "relay", func(got context.Context) error {
+		if got != ctx {
+			t.Fatal("shutdown context was not forwarded")
+		}
+		finished = true
+		return nil
+	}, zerolog.Nop())
+	if !finished {
+		t.Fatal("shutdown returned before teardown")
 	}
 }
 

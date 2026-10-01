@@ -6,7 +6,7 @@ Architecture (host vs plugin, why intercept logging is on Congee): [plugin-archi
 
 ## Listen vs intercept
 
-- **Listen** (`messages.observe`, `index.own` / `OnStoredEvent`) is fire-and-forget. After an in-process subscription match, the relay goroutine only does a non-blocking enqueue (`select` / default drop). A background worker performs gRPC. Queue-full or plugin-down drops never fail the client. `OnStoredEvent` drops are healed by plugin backfill; pure observe drops are best-effort (metrics).
+- **Listen** (`messages.observe`, `index.own` / `OnStoredEvent`) is fire-and-forget. After an in-process subscription match, the relay goroutine only does a non-blocking enqueue (`select` / default drop). A background worker performs gRPC. Queue-full or plugin-down drops never fail the client. Both paths are best-effort. Recovery requires the plugin to reconcile against canonical storage; a timestamp watermark alone does not guarantee recovery of dropped or late events.
 - **Intercept** (`req.intercept`) is the **only** synchronous plugin call. It runs on `REQ` **before** `subs.Add`, with a deadline. Not ready, timeout, or RPC error → **fail-open passthrough**.
 - Host matches **subscriptions** before enqueue/RPC. Empty `kinds` / `message_types` match nothing (opt-in traffic).
 - **Intercept log** (host, not the plugin): after each intercept decision — including fail-open — the host copies the REQ, action, and plugin response onto a logging goroutine (`select` / default drop). The REQ path never waits. Default window is **100** (`plugins.intercept_log_size`; `0` disables; max 10000). Newest first; in-memory only. Shown on the **Congee** plugin settings page, not inside the sandboxed plugin iframe. See [plugin-architecture.md](plugin-architecture.md).

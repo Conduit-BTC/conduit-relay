@@ -156,13 +156,9 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("relay shutdown error")
-	}
+	shutdownOrExit(shutdownCtx, "relay", srv.Shutdown, log)
 	if adminSrv != nil {
-		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("admin shutdown error")
-		}
+		shutdownOrExit(shutdownCtx, "admin", adminSrv.Shutdown, log)
 	}
 	cancel()
 
@@ -178,6 +174,14 @@ func main() {
 	}
 
 	log.Info().Msg("bye")
+}
+
+func shutdownOrExit(ctx context.Context, server string, shutdown func(context.Context) error, log zerolog.Logger) {
+	if err := shutdown(ctx); err != nil {
+		log.Error().Err(err).Str("server", server).Msg("shutdown failed; exiting without closing storage or restarting")
+		// Active handlers can still use storage. Bypass cleanup defers and exec.
+		os.Exit(1)
+	}
 }
 
 func drainAuditAndCloseStore(store io.Closer) error {

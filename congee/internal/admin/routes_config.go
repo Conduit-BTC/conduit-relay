@@ -78,11 +78,7 @@ func handlePutConfig(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log ze
 		if len(prev) > 0 {
 			diff = "previous_bytes=" + strconv.Itoa(len(prev)) + "\n" + string(config.RedactSecretsForLog(body))
 		}
-		if err := config.SaveConfigChange(r.Context(), st, "PUT /api/config", diff); err != nil {
-			cfgMu.Unlock()
-			http.Error(w, `{"error":"changelog write failed"}`, http.StatusInternalServerError)
-			return
-		}
+		auditWarning := recordCommittedConfigChange(r.Context(), st, log, "PUT /api/config", diff)
 		cfgMu.Unlock()
 
 		if needRestart && scheduleRestart != nil {
@@ -90,12 +86,27 @@ func handlePutConfig(cfgPath string, cfgMu *sync.Mutex, st storage.Store, log ze
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		result := map[string]any{
 			"ok":               true,
 			"restart_required": needRestart,
 			"restarting":       needRestart && scheduleRestart != nil,
-		})
+		}
+		if auditWarning != "" {
+			result["audit_warning"] = auditWarning
+		}
+		_ = json.NewEncoder(w).Encode(result)
 	}
+}
+
+// recordCommittedConfigChange treats changelog failure as a warning after the
+// atomic config write. A failed audit must not prevent applying committed settings.
+func recordCommittedConfigChange(ctx context.Context, meta storage.MetaStore, log zerolog.Logger, summary, diff string) string {
+	if err := config.SaveConfigChange(ctx, meta, summary, diff); err != nil {
+		// Storage errors can include config secrets; log only the fixed operation.
+		log.Warn().Str("operation", summary).Msg("config saved but changelog write failed")
+		return "Configuration was saved, but the audit changelog could not be recorded."
+	}
+	return ""
 }
 
 func configRestartNeeded(prevFile []byte, newCfg *config.Config) bool {
