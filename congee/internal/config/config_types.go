@@ -1,0 +1,295 @@
+package config
+
+import "encoding/json"
+
+// Config matches the root object in config.example.json.
+type Config struct {
+	Relay                   RelaySection            `json:"relay"`
+	Admin                   AdminSection            `json:"admin"`
+	Database                DatabaseSection         `json:"database"`
+	Logging                 LoggingSection          `json:"logging"`
+	Audit                   AuditSection            `json:"audit"`
+	Metrics                 MetricsSection          `json:"metrics"`
+	RateLimits              RateLimitsSection       `json:"rate_limits"`
+	ConnectionLimits        ConnectionLimitsSection `json:"connection_limits"`
+	WebSocket               WebSocketSection        `json:"websocket"`
+	MaxSubscriptionIDLength int                     `json:"max_subscription_id_length"`
+	NIP11                   NIP11Section            `json:"nip11"`
+	NIP42                   NIP42Section            `json:"nip42"`
+	NIP29                   NIP29Section            `json:"nip29"`
+	NIP17                   NIP17Section            `json:"nip17"`
+	NIP77                   NIP77Section            `json:"nip77"`
+	NIPs                    NIPsSection             `json:"nips"`
+	Plugins                 PluginsSection          `json:"plugins"`
+}
+
+// DefaultPluginInterceptTimeoutMs is used when plugins.intercept_timeout_ms is omitted or 0.
+const DefaultPluginInterceptTimeoutMs = 250
+
+// DefaultPluginInterceptLogSize is the in-memory intercept log window when intercept_log_size is omitted.
+const DefaultPluginInterceptLogSize = 100
+
+// MaxPluginInterceptLogSize caps the rolling intercept log.
+const MaxPluginInterceptLogSize = 10000
+
+// PluginsSection is the host plugin manager configuration.
+type PluginsSection struct {
+	Directory          string `json:"directory,omitempty"`
+	InterceptTimeoutMs int    `json:"intercept_timeout_ms,omitempty"`
+	// InterceptLogSize is the per-plugin rolling intercept log window. nil = default 100; 0 disables.
+	InterceptLogSize *int         `json:"intercept_log_size,omitempty"`
+	Items            []PluginItem `json:"items,omitempty"`
+}
+
+// PluginItem is one installed plugin in config.json.
+type PluginItem struct {
+	ID        string          `json:"id"`
+	Enabled   bool            `json:"enabled"`
+	SourceURL string          `json:"source_url,omitempty"`
+	SHA256    string          `json:"sha256,omitempty"`
+	Version   string          `json:"version,omitempty"`
+	Settings  json.RawMessage `json:"settings,omitempty"`
+}
+
+type RelaySection struct {
+	Port       int    `json:"port"`
+	InstanceID string `json:"instance_id,omitempty"`
+}
+
+type AdminSection struct {
+	Port int `json:"port"`
+}
+
+// DefaultDatabaseType is used when database.type is empty in JSON config.
+const DefaultDatabaseType = "turso"
+
+type DatabaseSection struct {
+	Type    string `json:"type"`
+	DSN     string `json:"dsn"`
+	MetaDSN string `json:"meta_dsn,omitempty"`
+}
+
+type LoggingSection struct {
+	Level  string `json:"level"`
+	Format string `json:"format"`
+}
+
+type AuditSection struct {
+	RetentionDays int `json:"retention_days"`
+}
+
+// MetricsSection configures persisted relay telemetry (per-minute buckets).
+type MetricsSection struct {
+	// RelayBucketRetentionDays drops relay_metric_buckets older than this many days (UTC minute buckets).
+	RelayBucketRetentionDays int `json:"relay_bucket_retention_days"`
+}
+
+type RateLimitsSection struct {
+	EventsPerMinutePerConnection int `json:"events_per_minute_per_connection"`
+	BytesPerSecondPerConnection  int `json:"bytes_per_second_per_connection"`
+	ReqsPerMinutePerConnection   int `json:"reqs_per_minute_per_connection"`
+	MessagesPerMinutePerIP       int `json:"messages_per_minute_per_ip"`
+}
+
+type ConnectionLimitsSection struct {
+	MaxOpen int `json:"max_open"`
+	// Forwarded client addresses are accepted only from these proxy networks.
+	TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs,omitempty"`
+	// Empty uses X-Forwarded-For; single-address headers require explicit selection.
+	TrustedProxyClientIPHeader string `json:"trusted_proxy_client_ip_header,omitempty"`
+	// MaxOpenPerIP caps concurrent WebSockets per peer IP. Zero disables the cap.
+	MaxOpenPerIP                  int `json:"max_open_per_ip"`
+	MaxSubscriptionsPerConnection int `json:"max_subscriptions_per_connection"`
+	MaxFiltersPerReq              int `json:"max_filters_per_req"`
+	ConnectionsPerMinutePerIP     int `json:"connections_per_minute_per_ip"`
+	// IdleNoEventNoSubSeconds closes connections with no client EVENT and no open REQ
+	// subscriptions after this many seconds. Zero disables the idle sweeper.
+	IdleNoEventNoSubSeconds int  `json:"idle_no_event_no_sub_seconds"`
+	ReadDeadlineSeconds     int  `json:"read_deadline_seconds"`
+	WriteDeadlineSeconds    int  `json:"write_deadline_seconds"`
+	DefaultQueryLimit       *int `json:"default_query_limit,omitempty"`
+	QueryPageSize           *int `json:"query_page_size,omitempty"`
+}
+
+// DefaultQueryLimitIfUnset caps initial REQ results per filter when default_query_limit is omitted from JSON.
+const DefaultQueryLimitIfUnset = 500
+
+// DefaultQueryPageSizeIfUnset is the internal REQ read chunk size when query_page_size is omitted from JSON.
+const DefaultQueryPageSizeIfUnset = 100
+
+// EffectiveREQDefaultQueryLimit returns the cap applied when a subscription filter omits "limit".
+// A nil config pointer uses DefaultQueryLimitIfUnset. A non-positive configured value disables that cap
+// for omitted limits (the relay treats 0 as unlimited at apply time).
+func EffectiveREQDefaultQueryLimit(p *int) int {
+	if p == nil {
+		return DefaultQueryLimitIfUnset
+	}
+	if *p <= 0 {
+		return 0
+	}
+	return *p
+}
+
+// EffectiveQueryPageSize returns the internal REQ pagination chunk size.
+// A nil config pointer uses DefaultQueryPageSizeIfUnset. A non-positive configured value disables paging
+// (single query, legacy behavior).
+func EffectiveQueryPageSize(p *int) int {
+	if p == nil {
+		return DefaultQueryPageSizeIfUnset
+	}
+	return *p
+}
+
+type WebSocketSection struct {
+	CompressionEnabled bool `json:"compression_enabled"`
+	MaxMessageBytes    int  `json:"max_message_bytes"`
+}
+
+const (
+	// NIP11ImageSourceDefault serves the built-in Congee artwork.
+	NIP11ImageSourceDefault = "default"
+	// NIP11ImageSourceUpload serves a file stored beside the JSON config.
+	NIP11ImageSourceUpload = "upload"
+	// NIP11ImageSourceURL publishes an external absolute http(s) URL and does not serve a local file.
+	NIP11ImageSourceURL = "url"
+)
+
+const (
+	NIP11AssetIcon   = "icon"
+	NIP11AssetBanner = "banner"
+)
+
+// Upload size caps for operator-supplied NIP-11 images.
+const (
+	NIP11IconMaxBytes   = 512 * 1024
+	NIP11BannerMaxBytes = 2 * 1024 * 1024
+)
+
+type NIP11Section struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Banner       string `json:"banner,omitempty"`
+	Icon         string `json:"icon,omitempty"`
+	IconSource   string `json:"icon_source,omitempty"`
+	BannerSource string `json:"banner_source,omitempty"`
+	// AdminPubKey is an optional contact identity. Legacy nip11.pubkey is ignored.
+	AdminPubKey        string `json:"admin_pubkey,omitempty"`
+	Contact            string `json:"contact"`
+	Software           string `json:"software"`
+	CORSAllowAnyOrigin bool   `json:"cors_allow_any_origin"`
+}
+
+type NIPsSection struct {
+	Enabled []int `json:"enabled"`
+}
+
+const (
+	// NIP42RequireAuthProtectedKinds sends AUTH only when a protected kind is hit.
+	// Ordinary requests stay open. NIP-11 auth_required is false.
+	NIP42RequireAuthProtectedKinds = "protected_kinds"
+	// NIP42RequireAuthConnect challenges on WebSocket open and rejects every
+	// client command except AUTH until the connection authenticates.
+	// NIP-11 auth_required is true when NIP-42 is enabled.
+	NIP42RequireAuthConnect = "connect"
+)
+
+// NIP42Section configures NIP-42 client authentication (optional NIP).
+type NIP42Section struct {
+	RelayURL string `json:"relay_url"`
+	// RequireAuth is protected_kinds (lazy AUTH) or connect (reject traffic until AUTH).
+	// Legacy send_challenge_on_connect loads as protected_kinds.
+	RequireAuth string `json:"require_auth"`
+	// CreatedAtSkewSeconds is the maximum allowed |now - event.created_at| for AUTH events (seconds).
+	// Values <= 0 mean the relay uses its runtime default (600s).
+	CreatedAtSkewSeconds      int      `json:"created_at_skew_seconds"`
+	RequireAuthSubscribeKinds []int    `json:"require_auth_subscribe_kinds"`
+	RequireAuthPublishKinds   []int    `json:"require_auth_publish_kinds"`
+	AllowlistedPubkeys        []string `json:"allowlisted_pubkeys"`
+}
+
+// NIP11AuthRequired reports whether the NIP-11 limitation field auth_required is true.
+// Connect mode locks the relay only when NIP-42 itself is enabled.
+func NIP11AuthRequired(cfg *Config) bool {
+	if cfg == nil || cfg.NIP42.RequireAuth != NIP42RequireAuthConnect {
+		return false
+	}
+	for _, n := range cfg.NIPs.Enabled {
+		if n == 42 {
+			return true
+		}
+	}
+	return false
+}
+
+// NIP17Section configures NIP-17 private direct messages (optional NIP).
+type NIP17Section struct {
+	// RejectGiftWrapWhenDisabled rejects incoming kind 1059 when NIP-17 is not in nips.enabled.
+	// Omitted in JSON defaults to true. Ignored when NIP-17 is enabled.
+	RejectGiftWrapWhenDisabled *bool `json:"reject_gift_wrap_when_disabled,omitempty"`
+}
+
+// NIP17RejectGiftWrapWhenDisabled reports whether kind 1059 publishes should be rejected while NIP-17 is off.
+func NIP17RejectGiftWrapWhenDisabled(cfg *Config) bool {
+	if cfg == nil {
+		return true
+	}
+	for _, n := range cfg.NIPs.Enabled {
+		if n == 17 {
+			return false
+		}
+	}
+	if cfg.NIP17.RejectGiftWrapWhenDisabled == nil {
+		return true
+	}
+	return *cfg.NIP17.RejectGiftWrapWhenDisabled
+}
+
+// NIP29Section configures NIP-29 relay-based groups (optional NIP).
+type NIP29Section struct {
+	// LatePublicationMaxPastSeconds rejects events whose created_at is more than this many seconds in the past vs relay time. Zero means use the built-in default (86400).
+	LatePublicationMaxPastSeconds int `json:"late_publication_max_past_seconds"`
+	// StrictPreviousSameH requires each "previous" id prefix to resolve to an event whose "h" tag matches the publishing event's group id.
+	StrictPreviousSameH bool `json:"strict_previous_same_h"`
+}
+
+// NIP77Upstream configures one scheduled pull from an upstream relay (NIP-77 client role).
+type NIP77Upstream struct {
+	Name            string            `json:"name"`
+	URL             string            `json:"url"`
+	Filters         []json.RawMessage `json:"filters"`
+	IntervalSeconds int               `json:"interval_seconds"`
+	Enabled         bool              `json:"enabled"`
+}
+
+// NIP77Section configures NIP-77 negentropy syncing (optional NIP).
+type NIP77Section struct {
+	MaxRecordsPerQuery            int  `json:"max_records_per_query"`
+	SessionIdleTimeoutSeconds     int  `json:"session_idle_timeout_seconds"`
+	FrameSizeLimitBytes           int  `json:"frame_size_limit_bytes"`
+	MaxConcurrentSessions         int  `json:"max_concurrent_sessions"`
+	MaxConcurrentLoads            int  `json:"max_concurrent_loads"`
+	NegOpenPerMinutePerConnection int  `json:"neg_open_per_minute_per_connection"`
+	NegMsgPerMinutePerConnection  int  `json:"neg_msg_per_minute_per_connection"`
+	BackpressureReqQueueDepth     int  `json:"backpressure_req_queue_depth"`
+	UpstreamEnabled               bool `json:"upstream_enabled"`
+	UpstreamPauseWhenBusy         bool `json:"upstream_pause_when_busy"`
+	UpstreamMessageTimeoutSeconds int  `json:"upstream_message_timeout_seconds"`
+	// UpstreamAuthWaitSeconds is how long to wait after connect for a NIP-42 AUTH
+	// challenge before sending NEG-OPEN. Zero means do not wait: answer AUTH if it
+	// arrives later in the message loop.
+	UpstreamAuthWaitSeconds int             `json:"upstream_auth_wait_seconds"`
+	Upstreams               []NIP77Upstream `json:"upstreams"`
+}
+
+const (
+	DefaultNIP77MaxRecordsPerQuery            = 100_000
+	DefaultNIP77SessionIdleTimeoutSeconds     = 7
+	DefaultNIP77FrameSizeLimitBytes           = 1 << 20
+	DefaultNIP77MaxConcurrentSessions         = 8
+	DefaultNIP77MaxConcurrentLoads            = 2
+	DefaultNIP77NegOpenPerMinutePerConnection = 6
+	DefaultNIP77NegMsgPerMinutePerConnection  = 120
+	DefaultNIP77BackpressureReqQueueDepth     = 64
+	DefaultNIP77UpstreamMessageTimeoutSeconds = 60
+	DefaultNIP77UpstreamAuthWaitSeconds       = 0
+)

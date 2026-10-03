@@ -1,0 +1,549 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/michmich112/congee/internal/nostr"
+	"github.com/michmich112/congee/internal/storage"
+	"github.com/rs/zerolog"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/driver/pgdriver"
+)
+
+// Store is a PostgreSQL-backed storage.Store with LISTEN/NOTIFY fan-out.
+type Store struct {
+	db       *bun.DB
+	notifier *Notifier
+}
+
+var _ storage.EventStore = (*Store)(nil)
+
+// Open connects with Bun + pgdriver, runs migrations, and starts the event notifier listener.
+// instanceID is sent as NOTIFY payload origin so this process ignores its own writes.
+// log is used for optional debug traces (use zerolog.Nop() when silent).
+func Open(ctx context.Context, dsn string, instanceID string, log zerolog.Logger) (*Store, error) {
+	log = log.With().Str("engine", "postgres").Logger()
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil, errors.New("postgres: empty dsn")
+	}
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil, errors.New("postgres: relay instance id is required")
+	}
+
+	log.Debug().Msg("open: creating driver connector")
+	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	sqldb.SetMaxOpenConns(32)
+	sqldb.SetMaxIdleConns(8)
+
+	if err := sqldb.PingContext(ctx); err != nil {
+		_ = sqldb.Close()
+		log.Warn().Err(err).Msg("open: initial ping failed")
+		return nil, fmt.Errorf("postgres: ping: %w", err)
+	}
+	log.Debug().Msg("open: ping ok")
+
+	db := bun.NewDB(sqldb, pgdialect.New())
+	log.Debug().Msg("open: running schema migrations")
+	if err := runMigrations(ctx, db, log); err != nil {
+		_ = db.Close()
+		log.Warn().Err(err).Msg("open: schema migrations failed")
+		return nil, err
+	}
+	log.Debug().Msg("open: schema migrations done")
+
+	log.Debug().Msg("open: starting listen/notify notifier")
+	n, err := NewNotifier(db, dsn, instanceID)
+	if err != nil {
+		_ = db.Close()
+		log.Warn().Err(err).Msg("open: notifier startup failed")
+		return nil, err
+	}
+	log.Debug().Msg("open: store ready")
+	return &Store{db: db, notifier: n}, nil
+}
+
+// Notifier returns the store's EventNotifier (same instance receives NOTIFY and exposes Listen).
+func (s *Store) Notifier() storage.EventNotifier { return s.notifier }
+
+// Close closes the notifier and database pool.
+func (s *Store) Close() error {
+	var err1, err2 error
+	if s.notifier != nil {
+		err1 = s.notifier.Close()
+	}
+	if s.db != nil {
+		err2 = s.db.Close()
+	}
+	return errors.Join(err1, err2)
+}
+
+func extractDTag(tags [][]string) string {
+	for _, t := range tags {
+		if len(t) > 0 && t[0] == "d" {
+			if len(t) > 1 {
+				return t[1]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// eventTagInsert maps full_json to JSONB for PostgreSQL.
+// FullJSON uses json.RawMessage so bun inserts a JSON array value, not a JSON string
+// containing the array (which happens if full_json is typed as string + jsonb).
+type eventTagInsert struct {
+	bun.BaseModel `bun:"table:event_tags,alias:et"`
+
+	EventID  string          `bun:"event_id,notnull"`
+	Pos      int             `bun:"pos,notnull"`
+	Name     string          `bun:"name,notnull"`
+	Value    string          `bun:"value,notnull"`
+	FullJSON json.RawMessage `bun:"full_json,notnull,type:jsonb"`
+}
+
+// SaveEvent persists an event, replacing prior replaceable/addressable rows per NIP-01.
+func (s *Store) SaveEvent(ctx context.Context, ev *nostr.Event) error {
+	if nostr.IsEphemeral(ev.Kind) {
+		return errors.New("postgres: ephemeral events are not stored")
+	}
+	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		conditionalInsert := false
+		switch nostr.ClassifyKind(ev.Kind) {
+		case nostr.KindReplaceable:
+			conditionalInsert = true
+			if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", fmt.Sprintf("%s:%d", ev.PubKey, ev.Kind)); err != nil {
+				return err
+			}
+			if _, err := tx.NewDelete().Model((*storage.EventRow)(nil)).
+				Where("pubkey = ? AND kind = ? AND (created_at < ? OR (created_at = ? AND id > ?))", ev.PubKey, ev.Kind, ev.CreatedAt, ev.CreatedAt, ev.ID).
+				Exec(ctx); err != nil {
+				return err
+			}
+		case nostr.KindAddressable:
+			conditionalInsert = true
+			dt := extractDTag(ev.Tags)
+			if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", fmt.Sprintf("%s:%d:%s", ev.PubKey, ev.Kind, dt)); err != nil {
+				return err
+			}
+			if _, err := tx.NewDelete().Model((*storage.EventRow)(nil)).
+				Where("pubkey = ? AND kind = ? AND d_tag = ? AND (created_at < ? OR (created_at = ? AND id > ?))", ev.PubKey, ev.Kind, dt, ev.CreatedAt, ev.CreatedAt, ev.ID).
+				Exec(ctx); err != nil {
+				return err
+			}
+		}
+
+		row := storage.EventRow{
+			ID:        ev.ID,
+			Pubkey:    ev.PubKey,
+			CreatedAt: ev.CreatedAt,
+			Kind:      ev.Kind,
+			Content:   ev.Content,
+			Sig:       ev.Sig,
+			DTag:      extractDTag(ev.Tags),
+		}
+		if conditionalInsert {
+			where := "pubkey = ? AND kind = ?"
+			args := []any{row.ID, row.Pubkey, row.CreatedAt, row.Kind, row.Content, row.Sig, row.DTag, row.Pubkey, row.Kind}
+			if nostr.ClassifyKind(ev.Kind) == nostr.KindAddressable {
+				where += " AND d_tag = ?"
+				args = append(args, row.DTag)
+			}
+			result, err := tx.ExecContext(ctx,
+				"INSERT INTO events (id, pubkey, created_at, kind, content, sig, d_tag) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM events WHERE "+where+")", args...)
+			if err != nil {
+				return err
+			}
+			inserted, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if inserted == 0 {
+				return storage.ErrStaleReplaceable
+			}
+		} else if _, err := tx.NewInsert().Model(&row).Exec(ctx); err != nil {
+			return err
+		}
+		tags := make([]eventTagInsert, 0, len(ev.Tags))
+		for i, t := range ev.Tags {
+			full, err := json.Marshal(t)
+			if err != nil {
+				return err
+			}
+			val := ""
+			if len(t) > 1 {
+				val = t[1]
+			}
+			name := ""
+			if len(t) > 0 {
+				name = t[0]
+			}
+			tags = append(tags, eventTagInsert{
+				EventID:  ev.ID,
+				Pos:      i,
+				Name:     name,
+				Value:    val,
+				FullJSON: full,
+			})
+		}
+		if len(tags) > 0 {
+			if _, err := tx.NewInsert().Model(&tags).Exec(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !storage.IsBulkMigration(ctx) {
+		s.notifier.Notify(ev.ID)
+	}
+	return nil
+}
+
+func (s *Store) rowToEvent(ctx context.Context, row *storage.EventRow) (*nostr.Event, error) {
+	var tagRows []storage.EventTagRow
+	err := s.db.NewSelect().Model(&tagRows).
+		Where("event_id = ?", row.ID).
+		Order("pos ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := storage.GroupTagRows(tagRows)
+	if err != nil {
+		return nil, err
+	}
+	return rowToEventWithTags(row, tags[row.ID]), nil
+}
+
+func (s *Store) tagsByEventID(ctx context.Context, ids []string) (map[string][][]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var tagRows []storage.EventTagRow
+	if err := s.db.NewSelect().Model(&tagRows).
+		Where("event_id IN (?)", bun.In(ids)).
+		Order("event_id ASC", "pos ASC").
+		Scan(ctx); err != nil {
+		return nil, err
+	}
+	return storage.GroupTagRows(tagRows)
+}
+
+func rowToEventWithTags(row *storage.EventRow, tags [][]string) *nostr.Event {
+	if tags == nil {
+		tags = [][]string{}
+	}
+	ev := &nostr.Event{
+		ID:        row.ID,
+		PubKey:    row.Pubkey,
+		CreatedAt: row.CreatedAt,
+		Kind:      row.Kind,
+		Tags:      tags,
+		Content:   row.Content,
+		Sig:       row.Sig,
+	}
+	return ev
+}
+
+func applyFilterQuery(q *bun.SelectQuery, f *nostr.Filter) *bun.SelectQuery {
+	return applyFilterQueryPrefix(q, f, "")
+}
+
+func applyFilterQueryPrefix(q *bun.SelectQuery, f *nostr.Filter, prefix string) *bun.SelectQuery {
+	col := func(name string) string {
+		if prefix == "" {
+			return name
+		}
+		return prefix + name
+	}
+	if len(f.IDs) > 0 {
+		q = q.Where(col("id")+" IN (?)", bun.In(f.IDs))
+	}
+	if len(f.Authors) > 0 {
+		q = q.Where(col("pubkey")+" IN (?)", bun.In(f.Authors))
+	}
+	if len(f.Kinds) > 0 {
+		q = q.Where(col("kind")+" IN (?)", bun.In(f.Kinds))
+	}
+	if f.Since != nil {
+		q = q.Where(col("created_at")+" >= ?", *f.Since)
+	}
+	if f.Until != nil {
+		q = q.Where(col("created_at")+" <= ?", *f.Until)
+	}
+	if f.Cursor != nil {
+		q = q.Where("("+col("created_at")+" < ? OR ("+col("created_at")+" = ? AND "+col("id")+" > ?))",
+			f.Cursor.CreatedAt, f.Cursor.CreatedAt, f.Cursor.ID)
+	}
+	for key, vals := range f.Tag {
+		if len(vals) == 0 {
+			q = q.Where("FALSE")
+			return q
+		}
+		name := key[1:]
+		q = q.Where(col("id")+" IN (SELECT event_id FROM event_tags WHERE name = ? AND value IN (?))",
+			name, bun.In(vals))
+	}
+	return q
+}
+
+func (s *Store) selectRows(ctx context.Context, f *nostr.Filter, applyLimits bool) ([]storage.EventRow, error) {
+	if f != nil && f.HasSearch() {
+		return nil, nil
+	}
+	var rows []storage.EventRow
+	q := s.db.NewSelect().Model(&rows)
+	q = applyFilterQuery(q, f)
+	q = q.Order("created_at DESC", "id ASC")
+	if lim := storage.FilterSQLLimit(f, applyLimits); lim != nil {
+		q = q.Limit(*lim)
+	}
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// QueryEvents returns events matching any of the filters (OR), newest first.
+func (s *Store) QueryEvents(ctx context.Context, filters []nostr.Filter) ([]*nostr.Event, error) {
+	if len(filters) == 0 {
+		return nil, nil
+	}
+	byID := make(map[string]storage.EventRow)
+	for i := range filters {
+		rows, err := s.selectRows(ctx, &filters[i], true)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			byID[r.ID] = r
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := byID[ids[i]], byID[ids[j]]
+		if a.CreatedAt != b.CreatedAt {
+			return a.CreatedAt > b.CreatedAt
+		}
+		return a.ID < b.ID
+	})
+	tagsMap, err := s.tagsByEventID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*nostr.Event, 0, len(ids))
+	for _, id := range ids {
+		row := byID[id]
+		out = append(out, rowToEventWithTags(&row, tagsMap[row.ID]))
+	}
+	return out, nil
+}
+
+// QueryEventSyncItems returns id+created_at rows matching filter, ascending for NIP-77.
+func (s *Store) QueryEventSyncItems(ctx context.Context, filter nostr.Filter) ([]storage.SyncItem, error) {
+	if filter.HasSearch() {
+		return nil, nil
+	}
+	type row struct {
+		ID        string `bun:"id"`
+		CreatedAt int64  `bun:"created_at"`
+	}
+	var rows []row
+	q := s.db.NewSelect().Model((*storage.EventRow)(nil)).Column("id", "created_at")
+	q = applyFilterQuery(q, &filter)
+	q = q.Order("created_at ASC", "id ASC")
+	if err := q.Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]storage.SyncItem, len(rows))
+	for i, r := range rows {
+		out[i] = storage.SyncItem{ID: r.ID, CreatedAt: r.CreatedAt}
+	}
+	return out, nil
+}
+
+// DeleteEvent removes an event and its tags.
+func (s *Store) DeleteEvent(ctx context.Context, id string) error {
+	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewDelete().Model((*storage.EventTagRow)(nil)).Where("event_id = ?", id).Exec(ctx); err != nil {
+			return err
+		}
+		_, err := tx.NewDelete().Model((*storage.EventRow)(nil)).Where("id = ?", id).Exec(ctx)
+		return err
+	})
+}
+
+// CountEvents returns how many distinct events match any filter (OR) via SQL COUNT.
+func (s *Store) CountEvents(ctx context.Context, filters []nostr.Filter) (int, error) {
+	if filters == nil || len(filters) == 0 {
+		var count int
+		err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&count)
+		return count, err
+	}
+
+	subQueries := make([]string, 0, len(filters))
+	var allArgs []interface{}
+	for i := range filters {
+		q, args, skip := storage.CountFilterSubQuery(&filters[i])
+		if skip {
+			continue
+		}
+		subQueries = append(subQueries, q)
+		allArgs = append(allArgs, args...)
+	}
+	if len(subQueries) == 0 {
+		return 0, nil
+	}
+
+	var fullSQL string
+	if len(subQueries) == 1 {
+		fullSQL = "SELECT COUNT(*) FROM (" + subQueries[0] + ") t"
+	} else {
+		fullSQL = "SELECT COUNT(*) FROM (" + strings.Join(subQueries, " UNION ") + ") t"
+	}
+
+	var count int
+	err := s.db.QueryRowContext(ctx, fullSQL, allArgs...).Scan(&count)
+	return count, err
+}
+
+// HasEventID implements storage.Store.
+func (s *Store) HasEventID(ctx context.Context, id string) (bool, error) {
+	n, err := s.db.NewSelect().Model((*storage.EventRow)(nil)).Where("id = ?", id).Limit(1).Count(ctx)
+	return n > 0, err
+}
+
+// SearchEvents uses tsvector + GIN (NIP-50), ordered by ts_rank_cd descending.
+func (s *Store) SearchEvents(ctx context.Context, searchQuery string, constraints nostr.Filter) ([]*nostr.Event, error) {
+	q := strings.TrimSpace(searchQuery)
+	if q == "" {
+		return nil, nil
+	}
+	cons := constraints.WithoutSearch()
+
+	var eventRows []storage.EventRow
+	sel := s.db.NewSelect().Model(&eventRows)
+	sel = sel.Where("search_vector @@ websearch_to_tsquery('english', ?)", q)
+	sel = sel.OrderExpr("ts_rank_cd(search_vector, websearch_to_tsquery('english', ?)) DESC, id ASC", q)
+	sel = applyFilterQueryPrefix(sel, &cons, "")
+	if lim := storage.FilterSQLLimit(&cons, true); lim != nil {
+		sel = sel.Limit(*lim)
+	}
+	if err := sel.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, len(eventRows))
+	for i, r := range eventRows {
+		ids[i] = r.ID
+	}
+	tagsMap, err := s.tagsByEventID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*nostr.Event, 0, len(eventRows))
+	for i := range eventRows {
+		out = append(out, rowToEventWithTags(&eventRows[i], tagsMap[eventRows[i].ID]))
+	}
+	return out, nil
+}
+
+func normalizeIDPrefix8(prefix string) string {
+	p := strings.TrimSpace(strings.ToLower(prefix))
+	if len(p) > 8 {
+		p = p[:8]
+	}
+	return p
+}
+
+// EventIDPrefixExists implements storage.Store (NIP-29).
+func (s *Store) EventIDPrefixExists(ctx context.Context, prefix string, groupID string, requireSameH bool) (bool, error) {
+	p := normalizeIDPrefix8(prefix)
+	if p == "" {
+		return false, nil
+	}
+	q := s.db.NewSelect().Model((*storage.EventRow)(nil)).
+		Where("id LIKE ?", p+"%")
+	if requireSameH && groupID != "" {
+		q = q.Where("id IN (SELECT event_id FROM event_tags WHERE name = 'h' AND value = ?)", groupID)
+	}
+	return q.Exists(ctx)
+}
+
+// GetLatestGroupMetadata39000 implements storage.Store (NIP-29).
+func (s *Store) GetLatestGroupMetadata39000(ctx context.Context, relayPubkey, groupID string) (*nostr.Event, error) {
+	var row storage.EventRow
+	err := s.db.NewSelect().Model(&row).
+		Where("pubkey = ? AND kind = ? AND d_tag = ?", relayPubkey, 39000, groupID).
+		Order("created_at DESC", "id ASC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return s.rowToEvent(ctx, &row)
+}
+
+// GetLatestGroupAdmins39001 implements storage.Store (NIP-29).
+func (s *Store) GetLatestGroupAdmins39001(ctx context.Context, relayPubkey, groupID string) (*nostr.Event, error) {
+	var row storage.EventRow
+	err := s.db.NewSelect().Model(&row).
+		Where("pubkey = ? AND kind = ? AND d_tag = ?", relayPubkey, nostr.NIP29KindGroupAdmins, groupID).
+		Order("created_at DESC", "id ASC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return s.rowToEvent(ctx, &row)
+}
+
+// IsGroupMember implements storage.Store (NIP-29).
+func (s *Store) IsGroupMember(ctx context.Context, relayPubkey, groupID, memberPubkey string) (bool, error) {
+	var row storage.EventRow
+	err := s.db.NewSelect().Model(&row).
+		TableExpr("events e").
+		Column("e.id", "e.pubkey", "e.created_at", "e.kind", "e.content", "e.sig", "e.d_tag").
+		Join("INNER JOIN event_tags et_h ON et_h.event_id = e.id AND et_h.name = 'h' AND et_h.value = ?", groupID).
+		Join("INNER JOIN event_tags et_p ON et_p.event_id = e.id AND et_p.name = 'p' AND et_p.value = ?", memberPubkey).
+		Where("e.pubkey = ?", relayPubkey).
+		Where("e.kind IN (?, ?)", 9000, 9001).
+		Order("e.created_at DESC", "e.id ASC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	switch row.Kind {
+	case 9000:
+		return true, nil
+	case 9001:
+		return false, nil
+	default:
+		return false, nil
+	}
+}
