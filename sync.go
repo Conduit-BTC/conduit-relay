@@ -184,7 +184,6 @@ func (s *RelaySyncer) backfill(ctx context.Context) error {
 		importedDelta := stats.Imported - windowImportedBefore
 		duplicateDelta := stats.Duplicates - windowDuplicateBefore
 		rejectedDelta := stats.Rejected - windowRejectedBefore
-		full = importedDelta >= s.cfg.FetchLimit
 		s.cfg.Logger.Printf("backfill window start=%s end=%s imported=%d duplicates=%d rejected=%d full=%t", start.Format(time.RFC3339), next.Format(time.RFC3339), importedDelta, duplicateDelta, rejectedDelta, full)
 		if full && next.Sub(start) > minBackfillWindow {
 			window /= 2
