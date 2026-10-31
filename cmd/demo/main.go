@@ -44,7 +44,7 @@ func main() {
 
 	conduitl2.ConfigureRelay(relay, opts)
 	baseQuery := relay.QueryStored
-	relay.QueryStored = conduitl2.WrapProductQueries(baseQuery, opts)
+	relay.QueryStored = conduitl2.WrapProductQueries(relay, baseQuery, opts)
 
 	relay.Info.Name = "khatru conduit l2 scope2 demo"
 	relay.Info.Description = "demo relay with conduit scope2 extensions enabled"

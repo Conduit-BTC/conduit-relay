@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -109,7 +108,7 @@ type scope2State struct {
 
 var (
 	scope2RegistryMu sync.RWMutex
-	scope2Registry   = map[uintptr]*scope2State{}
+	scope2Registry   = map[*khatru.Relay]*scope2State{}
 )
 
 func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
@@ -117,7 +116,7 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 
 	prevQuery := relay.QueryStored
 	state := newScope2State(prevQuery)
-	registerScope2State(prevQuery, state)
+	registerScope2State(relay, state)
 
 	relay.Info.AddSupportedNIPs([]int{17, 59})
 	if opts.EnableNIP50 {
@@ -172,7 +171,6 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 			applyRequestBounds(&filter, opts)
 			return prevQuery(ctx, filter)
 		}
-		registerScope2State(relay.QueryStored, state)
 	}
 
 	prevRequest := relay.OnRequest
@@ -200,13 +198,12 @@ func ConfigureRelay(relay *khatru.Relay, opts Scope2Options) {
 	}
 
 	configureGiftWrapProtection(relay, opts.GiftWrapProtection)
-	registerScope2State(relay.QueryStored, state)
 }
 
-func WrapProductQueries(baseQuery StoreQuery, opts Scope2Options) StoreQuery {
+func WrapProductQueries(relay *khatru.Relay, baseQuery StoreQuery, opts Scope2Options) StoreQuery {
 	withDefaults(&opts)
 
-	state := lookupScope2State(baseQuery)
+	state := lookupScope2State(relay)
 	if state == nil {
 		state = newScope2State(baseQuery)
 	}
@@ -252,29 +249,25 @@ func newScope2State(baseQuery StoreQuery) *scope2State {
 	return state
 }
 
-func registerScope2State(query StoreQuery, state *scope2State) {
-	if query == nil || state == nil {
+func registerScope2State(relay *khatru.Relay, state *scope2State) {
+	if relay == nil || state == nil {
 		return
 	}
 
 	scope2RegistryMu.Lock()
-	scope2Registry[queryKey(query)] = state
+	scope2Registry[relay] = state
 	scope2RegistryMu.Unlock()
 }
 
-func lookupScope2State(query StoreQuery) *scope2State {
-	if query == nil {
+func lookupScope2State(relay *khatru.Relay) *scope2State {
+	if relay == nil {
 		return nil
 	}
 
 	scope2RegistryMu.RLock()
-	state := scope2Registry[queryKey(query)]
+	state := scope2Registry[relay]
 	scope2RegistryMu.RUnlock()
 	return state
-}
-
-func queryKey(query StoreQuery) uintptr {
-	return reflect.ValueOf(query).Pointer()
 }
 
 func (s *scope2State) seed(baseQuery StoreQuery) {
