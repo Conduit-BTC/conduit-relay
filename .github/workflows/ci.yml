@@ -1,4 +1,4 @@
-name: Go CI
+name: Go CI (legacy module)
 
 on:
   push:
@@ -11,6 +11,10 @@ on:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: legacy
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: legacy/go.mod
           cache: true
       - name: Check formatting
         shell: bash
@@ -54,7 +58,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: legacy/go.mod
           cache: true
       - name: Test all packages
         run: go test -count=1 ./...
@@ -69,7 +73,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: legacy/go.mod
           cache: true
       - name: Race-check all packages
         run: go test -race -count=1 ./...
