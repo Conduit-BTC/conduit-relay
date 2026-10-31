@@ -353,7 +353,7 @@ func (s *scope2State) applyDeleteEvent(evt nostr.Event) {
 				continue
 			}
 			for address, current := range s.products {
-				if current.Event.ID == id {
+				if current.Event.ID == id && current.Event.PubKey == evt.PubKey {
 					current.Tombstoned = true
 					s.products[address] = current
 				}
@@ -364,7 +364,7 @@ func (s *scope2State) applyDeleteEvent(evt nostr.Event) {
 				continue
 			}
 			current, ok := s.products[address]
-			if !ok {
+			if !ok || current.Event.PubKey != evt.PubKey {
 				continue
 			}
 			if current.Event.CreatedAt <= evt.CreatedAt {
