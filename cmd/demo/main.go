@@ -37,7 +37,6 @@ func main() {
 	opts := conduitl2.Scope2Options{
 		MaxQueryLimit:      100,
 		DefaultQueryLimit:  25,
-		MaxProjectionScan:  2000,
 		EnableNIP50:        true,
 		GiftWrapProtection: cfg.GiftWrapProtection,
 	}

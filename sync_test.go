@@ -151,9 +151,9 @@ func newSyncTestRelay(t *testing.T) (*khatru.Relay, *slicestore.SliceStore) {
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
-	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25, MaxProjectionScan: 200})
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25})
 	base := relay.QueryStored
-	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25})
 	return relay, store
 }
 

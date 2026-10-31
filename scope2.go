@@ -65,7 +65,6 @@ func (mode GiftWrapProtectionMode) String() string {
 type Scope2Options struct {
 	MaxQueryLimit          int
 	DefaultQueryLimit      int
-	MaxProjectionScan      int
 	AllowMixedCurrencySort bool
 	EnableNIP50            bool
 	GiftWrapProtection     GiftWrapProtectionMode
@@ -614,9 +613,6 @@ func withDefaults(opts *Scope2Options) {
 	}
 	if opts.DefaultQueryLimit <= 0 {
 		opts.DefaultQueryLimit = 50
-	}
-	if opts.MaxProjectionScan <= 0 {
-		opts.MaxProjectionScan = 2000
 	}
 }
 
