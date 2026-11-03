@@ -1,0 +1,5 @@
+# Routine reviews are owned by the repository maintainers.
+# Request specialist review explicitly for critical security, payment, auth,
+# privacy, data-loss, release-authority, or architecture risks. Explain the
+# concrete risk and the decision or validation needed.
+* @ericfj2140 @JamesTsetsekas
