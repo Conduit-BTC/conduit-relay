@@ -46,20 +46,37 @@ func TestProjectionDeleteByEventAndAddress(t *testing.T) {
 
 	byEvent := productEventFixture(1, 9, 1000, "apple", `{"title":"Apple","summary":"fresh","price":10,"currency":"USD","updatedAt":1000}`)
 	state.applyEvent(byEvent)
-	state.applyEvent(deleteEventFixture(4, 1001, []string{byEvent.ID.Hex()}, nil))
+	state.applyEvent(deleteEventFixture(4, 9, 1001, []string{byEvent.ID.Hex()}, nil))
 	require.True(t, state.products[productAddress(byEvent)].Tombstoned)
 
 	byAddress := productEventFixture(2, 9, 1002, "banana", `{"title":"Banana","summary":"yellow","price":7,"currency":"USD","updatedAt":1002}`)
 	state.applyEvent(byAddress)
 
 	address := fmt.Sprintf("%d:%s:%s", byAddress.Kind, byAddress.PubKey.Hex(), byAddress.Tags.GetD())
-	state.applyEvent(deleteEventFixture(5, 1003, nil, []string{address}))
+	state.applyEvent(deleteEventFixture(5, 9, 1003, nil, []string{address}))
 	require.True(t, state.products[productAddress(byAddress)].Tombstoned)
 
 	revived := productEventFixture(3, 9, 1004, "banana", `{"title":"Banana","summary":"back","price":8,"currency":"USD","updatedAt":1004}`)
 	state.applyEvent(revived)
 	require.False(t, state.products[productAddress(revived)].Tombstoned)
 	require.Equal(t, revived.ID, state.products[productAddress(revived)].Event.ID)
+}
+
+func TestProjectionDeleteIgnoresForeignAuthors(t *testing.T) {
+	state := newScope2State(nil)
+
+	victim := productEventFixture(1, 9, 1000, "apple", `{"title":"Apple","summary":"fresh","price":10,"currency":"USD","updatedAt":1000}`)
+	state.applyEvent(victim)
+
+	state.applyEvent(deleteEventFixture(4, 4, 1001, []string{victim.ID.Hex()}, nil))
+	require.False(t, state.products[productAddress(victim)].Tombstoned)
+
+	address := fmt.Sprintf("%d:%s:%s", victim.Kind, victim.PubKey.Hex(), victim.Tags.GetD())
+	state.applyEvent(deleteEventFixture(5, 4, 1002, nil, []string{address}))
+	require.False(t, state.products[productAddress(victim)].Tombstoned)
+
+	state.applyEvent(deleteEventFixture(6, 9, 1003, nil, []string{address}))
+	require.True(t, state.products[productAddress(victim)].Tombstoned)
 }
 
 func TestEvaluatePriceSortUsesUpdatedAtTieBreakers(t *testing.T) {
@@ -210,7 +227,7 @@ func productEventWithTagsFixture(idSeed byte, authorSeed byte, createdAt int64, 
 	}
 }
 
-func deleteEventFixture(seed byte, createdAt int64, eventIDs []string, addresses []string) nostr.Event {
+func deleteEventFixture(seed byte, authorSeed byte, createdAt int64, eventIDs []string, addresses []string) nostr.Event {
 	tags := make(nostr.Tags, 0, len(eventIDs)+len(addresses))
 	for _, id := range eventIDs {
 		tags = append(tags, nostr.Tag{"e", id})
@@ -221,7 +238,7 @@ func deleteEventFixture(seed byte, createdAt int64, eventIDs []string, addresses
 
 	return nostr.Event{
 		ID:        mustID(seed),
-		PubKey:    mustPubKey(seed),
+		PubKey:    mustPubKey(authorSeed),
 		CreatedAt: nostr.Timestamp(createdAt),
 		Kind:      5,
 		Tags:      tags,
