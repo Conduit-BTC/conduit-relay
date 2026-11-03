@@ -16,6 +16,12 @@ import (
 	"fiatjaf.com/nostr/eventstore/boltdb"
 )
 
+const (
+	relayName        = "Conduit Relay"
+	relayDescription = "Conduit-operated relay for commerce discovery, merchant publishing, and protected private-message delivery."
+	relayIconURL     = "https://shop.conduit.market/pwa-192x192.png"
+)
+
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
@@ -26,6 +32,7 @@ func main() {
 	defer stop()
 
 	relay := khatru.NewRelay()
+	configureRelayInformation(relay)
 
 	store := openStore(cfg)
 	defer store.Close()
@@ -46,9 +53,6 @@ func main() {
 	baseQuery := relay.QueryStored
 	relay.QueryStored = conduitl2.WrapProductQueries(baseQuery, opts)
 
-	relay.Info.Name = "khatru conduit l2 scope2 demo"
-	relay.Info.Description = "demo relay with conduit scope2 extensions enabled"
-
 	if _, err := conduitl2.StartRelaySync(ctx, relay, cfg.Sync); err != nil {
 		log.Fatalf("failed to start relay sync: %v", err)
 	}
@@ -68,6 +72,12 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("relay stopped: %v", err)
 	}
+}
+
+func configureRelayInformation(relay *khatru.Relay) {
+	relay.Info.Name = relayName
+	relay.Info.Description = relayDescription
+	relay.Info.Icon = relayIconURL
 }
 
 func openStore(cfg runtimeConfig) eventstore.Store {
