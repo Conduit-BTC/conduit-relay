@@ -1,10 +1,8 @@
-name: Congee
+name: Release validation
 
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
   push:
-    branches: [main]
     tags: ["congee-v*"]
 
 permissions:
@@ -15,6 +13,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  legacy:
+    name: Legacy relay full validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Check legacy formatting
+        run: test -z "$(gofmt -l $(git ls-files '*.go' ':!:congee/**'))"
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
+
   test:
     name: Congee tests and race checks
     runs-on: ubuntu-latest
@@ -76,7 +91,7 @@ jobs:
 
   image:
     name: Congee image and entrypoint smoke
-    needs: test
+    needs: [legacy, test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

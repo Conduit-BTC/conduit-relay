@@ -71,6 +71,8 @@ Stop if clients share an unexpected limiter bucket or a forged header changes th
 
 ## Build and validation
 
+Routine PR CI builds all three Go modules and the admin UI, then checks recipient protection. Full validation below is required for a release; run it on demand with `.github/workflows/congee.yml` or locally. It does not run on every PR or main push.
+
 Run these commands from the repository root:
 
 ```sh
@@ -87,7 +89,7 @@ python3 scripts/congee-smoke.py conduit-congee:review
 
 The image includes the static admin UI. CGO is required for libSQL. OCI labels identify this repository, the source commit, and the binary version.
 
-The Congee workflow runs fresh PostgreSQL startup and migration rollback regressions against an ephemeral PostgreSQL 17 service, with normal and race checks. These tests create and remove isolated schemas. Other PostgreSQL integration tests remain opt-in through `TEST_POSTGRES_DSN`; use a disposable test database because existing fixtures share rows and schema state. CI does not set this variable for the full suite.
+The manually dispatched or release-tag **Release validation** workflow runs fresh PostgreSQL startup and migration rollback regressions against an ephemeral PostgreSQL 17 service, with normal and race checks. These tests create and remove isolated schemas. Other PostgreSQL integration tests remain opt-in through `TEST_POSTGRES_DSN`; use a disposable test database because existing fixtures share rows and schema state. CI does not set this variable for the full suite.
 
 The admin migration tool copies a consistent source snapshot. It excludes writes received after the snapshot starts. Automatic primary-database cutover is disabled. Stop writes and complete a verified offline migration before changing the primary database. This release preserves the current production database; it requires no database cutover or event re-ingestion.
 
@@ -96,7 +98,7 @@ The admin migration tool copies a consistent source snapshot. It excludes writes
 1. Merge the reviewed PR into `main` after all required checks pass.
 2. Complete the database and configuration rehearsal before production deployment.
 3. Create the tag named in `congee/VERSION` at the reviewed commit on `main`.
-4. Push that tag. The Congee workflow validates it and publishes the image to GHCR.
+4. Push that tag. The Release validation workflow runs the full suites and container smoke, then publishes the tested image to GHCR.
 5. Record the image digest from the workflow. Deploy by digest, not a mutable tag.
 6. Preserve the existing `/data` volume, configuration, relay identity, and admin secret.
 7. Verify health, NIP-11 version, public discovery CORS, and external/local WebSocket access after deployment.
