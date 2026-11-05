@@ -13,26 +13,20 @@ It is organized as a self-contained module area with:
 - runnable demo relay (`cmd/demo`)
 - demo validation script (`run_demo.sh`)
 
-## Automated review boundary
+## CI and review
 
-Account-authenticated review execution belongs in a separate private runner.
-Public workflows must not receive the account credential or review App private
-key. The private runner reads an immutable pull request snapshot and submits
-actionable findings as inline review comments. It does not edit or push code.
+Pull requests run one `build` check: Congee, its admin UI, the plugin SDK,
+and the legacy relay must build. Focused recipient-protection tests and the
+public-workflow credential boundary run in that same job. Superseded runs cancel.
 
-After maintainers enable the private runner, it polls ready, same-repository
-pull requests targeting `main`. Reviews can start several minutes after an
-update. A clean correctness review can trigger one automatic Ponytail simplicity
-review per pull request.
+Full tests, formatting, vet, race checks, PostgreSQL regressions, and container
+smoke run through the manually dispatched **Release validation** workflow and
+on `congee-v*` tags. Only validated release tags publish images. See
+[Congee source and releases](docs/CONGEE_SOURCE.md) before releasing.
 
-The maintainer `m0wer` can request `/agent review` in a pull request comment or
-inline review comment. Use `/agent simplify` in a pull request comment for an
-explicit simplicity review. Each command must be the complete comment body.
-Other actors cannot request manual runs. Fork pull requests need human review.
-
-Code-changing agent hardening is paused. Maintainers must make fixes through
-normal pull requests and required CI. Report missing automated reviews to a
-maintainer; credential setup and runner recovery stay outside this public repo.
+Review is maintainer-requested. There is no PR-title gate or automatic second
+review pass. Keep account credentials and review App private keys out of public
+workflows.
 
 ## Build the demo relay
 
