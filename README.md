@@ -16,8 +16,18 @@ It is organized as a self-contained module area with:
 ## Pull request reviews
 
 The previous automated review runner and its `/agent review` and
-`/agent simplify` commands are retired. Devin review integration is pending;
-maintainers should use human review and required CI until it is connected.
+`/agent simplify` commands are retired. Reviews now use the Devin GitHub
+integration and are requested manually:
+
+- PR review: an authorized maintainer with a linked Devin account can comment
+  `/devin review` on an open pull request.
+- Final simplicity review: invoke the organization's Ponytail skill in Devin
+  with `@skills:ponytail-final <PR URL>`, or in the Devin CLI with
+  `/ponytail:ponytail-final <PR URL>` after syncing organization plugins.
+  Use this advisory pass after correctness feedback has been addressed.
+
+Automatic review and autoapproval rules are disabled. Ponytail runs only on
+explicit request. Human review and required CI remain required.
 
 Review credentials must remain outside public workflows. Review output does
 not authorize code changes, approval, merge, or deployment.
