@@ -13,26 +13,24 @@ It is organized as a self-contained module area with:
 - runnable demo relay (`cmd/demo`)
 - demo validation script (`run_demo.sh`)
 
-## Automated review boundary
+## Pull request reviews
 
-Account-authenticated review execution belongs in a separate private runner.
-Public workflows must not receive the account credential or review App private
-key. The private runner reads an immutable pull request snapshot and submits
-actionable findings as inline review comments. It does not edit or push code.
+The previous automated review runner and its `/agent review` and
+`/agent simplify` commands are retired. Reviews now use the Devin GitHub
+integration and are requested manually:
 
-After maintainers enable the private runner, it polls ready, same-repository
-pull requests targeting `main`. Reviews can start several minutes after an
-update. A clean correctness review can trigger one automatic Ponytail simplicity
-review per pull request.
+- PR review: an authorized maintainer with a linked Devin account can comment
+  `/devin review` on an open pull request.
+- Final simplicity review: invoke the organization's Ponytail skill in Devin
+  with `@skills:ponytail-final <PR URL>`, or in the Devin CLI with
+  `/ponytail:ponytail-final <PR URL>` after syncing organization plugins.
+  Use this advisory pass after correctness feedback has been addressed.
 
-The maintainer `m0wer` can request `/agent review` in a pull request comment or
-inline review comment. Use `/agent simplify` in a pull request comment for an
-explicit simplicity review. Each command must be the complete comment body.
-Other actors cannot request manual runs. Fork pull requests need human review.
+Automatic review and autoapproval rules are disabled. Ponytail runs only on
+explicit request. Human review and required CI remain required.
 
-Code-changing agent hardening is paused. Maintainers must make fixes through
-normal pull requests and required CI. Report missing automated reviews to a
-maintainer; credential setup and runner recovery stay outside this public repo.
+Review credentials must remain outside public workflows. Review output does
+not authorize code changes, approval, merge, or deployment.
 
 ## Build the demo relay
 
