@@ -24,6 +24,8 @@ const (
 	minBackfillWindow     = time.Second
 )
 
+var errSyncStateCorrupt = errors.New("corrupt sync state")
+
 var defaultSyncRelays = []string{
 	"wss://relay.damus.io",
 	"wss://nos.lol",
@@ -184,7 +186,6 @@ func (s *RelaySyncer) backfill(ctx context.Context) error {
 		importedDelta := stats.Imported - windowImportedBefore
 		duplicateDelta := stats.Duplicates - windowDuplicateBefore
 		rejectedDelta := stats.Rejected - windowRejectedBefore
-		full = importedDelta >= s.cfg.FetchLimit
 		s.cfg.Logger.Printf("backfill window start=%s end=%s imported=%d duplicates=%d rejected=%d full=%t", start.Format(time.RFC3339), next.Format(time.RFC3339), importedDelta, duplicateDelta, rejectedDelta, full)
 		if full && next.Sub(start) > minBackfillWindow {
 			window /= 2
@@ -363,7 +364,10 @@ func (s *RelaySyncer) advanceState(ts time.Time) error {
 
 func (s *RelaySyncer) loadState() error {
 	state, err := readSyncState(s.cfg.StatePath)
-	if err != nil {
+	if errors.Is(err, errSyncStateCorrupt) {
+		s.cfg.Logger.Printf("sync state unreadable; resetting watermark: %v", err)
+		state = syncState{}
+	} else if err != nil {
 		return err
 	}
 	s.state = state
@@ -423,7 +427,7 @@ func readSyncState(path string) (syncState, error) {
 
 	var state syncState
 	if err := json.Unmarshal(b, &state); err != nil {
-		return syncState{}, fmt.Errorf("decode sync state: %w", err)
+		return syncState{}, fmt.Errorf("decode sync state: %v (%w)", err, errSyncStateCorrupt)
 	}
 	return state, nil
 }
@@ -439,8 +443,13 @@ func writeSyncState(path string, state syncState) error {
 	if err != nil {
 		return fmt.Errorf("encode sync state: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return fmt.Errorf("write sync state: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename sync state: %w", err)
 	}
 	return nil
 }

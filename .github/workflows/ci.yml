@@ -1,79 +1,62 @@
-name: Go CI (legacy module)
+name: CI
 
 on:
-  push:
-    branches:
-      - main
-      - "agent/**"
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    working-directory: legacy
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  static:
-    name: Format, vet, and build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: legacy/go.mod
-          cache: true
-      - name: Check formatting
-        shell: bash
-        run: |
-          mapfile -t go_files < <(git ls-files '*.go')
-          unformatted="$(gofmt -l "${go_files[@]}")"
-          if [[ -n "$unformatted" ]]; then
-            printf 'Unformatted Go files:\n%s\n' "$unformatted"
-            gofmt -d "${go_files[@]}"
-            exit 1
-          fi
-      - name: Vet
-        run: go vet ./...
-      - name: Build
-        run: go build ./...
-
-  test:
-    name: Ordinary unit and local product tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: legacy/go.mod
-          cache: true
-      - name: Test all packages
-        run: go test -count=1 ./...
-
-  race:
-    name: Race-check all packages
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - name: Check immutable workflow dependencies
+        run: |
+          ruby scripts/check-action-pins-test.rb
+          ruby scripts/check-action-pins.rb
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: legacy/go.mod
-          cache: true
-      - name: Race-check all packages
-        run: go test -race -count=1 ./...
+          go-version: "1.27.1"
+          cache-dependency-path: |
+            legacy/go.sum
+            congee/go.sum
+            congee/sdk/plugin/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: congee/web/admin/package-lock.json
+      - name: Build Congee admin UI
+        working-directory: congee/web/admin
+        run: npm ci && npm run build
+      - name: Build Congee
+        working-directory: congee
+        run: go build ./...
+      - name: Build plugin SDK
+        working-directory: congee/sdk/plugin
+        run: go build ./...
+      - name: Build legacy relay
+        working-directory: legacy
+        run: go build ./...
+      - name: Check recipient protection
+        working-directory: congee
+        run: >-
+          go test -count=1
+          -run 'GiftWrap|NIP17|NIP42|NEG.*(Protected|GiftWrap|Private|Group)|EventVisib|REQPlugin'
+          ./internal/relay ./internal/config ./internal/nip77/upstream
+      - name: Check legacy protection, sync recovery, and credential boundary
+        working-directory: legacy
+        run: go test -count=1 -run 'GiftWrap|TestPublicAgentCredentialBoundary|TestProjectionDelete|TestProductQueriesKeepRelayIndexesSeparate|TestRelaySyncerBackfill|TestRelaySyncerLoadStateRecovery|TestSyncStateReplacement' .

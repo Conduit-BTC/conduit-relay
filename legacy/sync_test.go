@@ -1,9 +1,11 @@
 package conduitl2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"iter"
+	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -151,9 +153,9 @@ func newSyncTestRelay(t *testing.T) (*khatru.Relay, *slicestore.SliceStore) {
 	store := &slicestore.SliceStore{}
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
-	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25, MaxProjectionScan: 200})
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25})
 	base := relay.QueryStored
-	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 50, DefaultQueryLimit: 25})
 	return relay, store
 }
 
@@ -200,4 +202,81 @@ func (s stubSyncPool) FetchMany(ctx context.Context, urls []string, filter nostr
 
 func (s stubSyncPool) SubscribeMany(ctx context.Context, urls []string, filter nostr.Filter, opts nostr.SubscriptionOptions) chan nostr.RelayEvent {
 	return s.subscribeMany(ctx, urls, filter, opts)
+}
+
+// A full response containing already-stored events must still split the window:
+// the source may have more events than its response limit allows it to return.
+func TestRelaySyncerBackfillSplitsDuplicateWindow(t *testing.T) {
+	relay, _ := newSyncTestRelay(t)
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	evt := signedProductEvent(t, nostr.Generate(), start.Add(10*time.Minute).Unix(), "apple", `{"title":"Apple"}`)
+	syncer := &RelaySyncer{relay: relay, cfg: SyncConfig{
+		BackfillSince: start, BackfillWindow: time.Hour, FetchLimit: 2,
+		VerifySignatures: true,
+	}}
+	syncer.handleIncomingEvent(t.Context(), evt)
+	var filters []nostr.Filter
+	syncer.pool = stubSyncPool{fetchMany: func(_ context.Context, _ []string, filter nostr.Filter, _ nostr.SubscriptionOptions) chan nostr.RelayEvent {
+		filters = append(filters, filter)
+		ch := make(chan nostr.RelayEvent, 2)
+		if len(filters) == 1 {
+			ch <- nostr.RelayEvent{Event: evt}
+			ch <- nostr.RelayEvent{Event: evt}
+		}
+		close(ch)
+		return ch
+	}}
+	require.NoError(t, syncer.backfill(t.Context()))
+	require.GreaterOrEqual(t, len(filters), 2)
+	require.Equal(t, filters[0].Since, filters[1].Since, "retry the same start before advancing the watermark")
+	require.Less(t, filters[1].Until, filters[0].Until, "split even when no new events were imported")
+	require.Equal(t, 1, syncer.Stats().Imported)
+	require.Equal(t, 2, syncer.Stats().Duplicates)
+}
+
+func TestRelaySyncerLoadStateRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		want          int64
+	}{
+		{"truncated", `{"synced_until":`, 0},
+		{"valid", `{"synced_until":1234}`, 1234},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			require.NoError(t, os.WriteFile(path, []byte(tc.content), 0o600))
+			var logs bytes.Buffer
+			syncer := &RelaySyncer{cfg: SyncConfig{StatePath: path, Logger: log.New(&logs, "", 0)}}
+			require.NoError(t, syncer.loadState())
+			require.Equal(t, tc.want, syncer.state.SyncedUntil)
+			if tc.name == "truncated" {
+				require.Contains(t, logs.String(), "resetting watermark")
+			} else {
+				require.Empty(t, logs.String())
+			}
+		})
+	}
+	t.Run("read error remains fatal", func(t *testing.T) {
+		syncer := &RelaySyncer{cfg: SyncConfig{StatePath: t.TempDir()}}
+		require.ErrorContains(t, syncer.loadState(), "read sync state")
+	})
+}
+
+func TestSyncStateReplacementPreservesPreviousOnWriteFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	previous := syncState{SyncedUntil: 100}
+	require.NoError(t, writeSyncState(path, previous))
+	// A blocked temporary destination must not truncate the last good state.
+	require.NoError(t, os.Mkdir(path+".tmp", 0o700))
+	require.Error(t, writeSyncState(path, syncState{SyncedUntil: 200}))
+	got, err := readSyncState(path)
+	require.NoError(t, err)
+	require.Equal(t, previous, got)
+	require.NoError(t, os.Remove(path+".tmp"))
+	require.NoError(t, writeSyncState(path, syncState{SyncedUntil: 200}))
+	got, err = readSyncState(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(200), got.SyncedUntil)
+	_, err = os.Stat(path + ".tmp")
+	require.True(t, os.IsNotExist(err))
 }
