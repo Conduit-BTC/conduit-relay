@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"testing"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/slicestore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -259,4 +261,30 @@ func mustPubKey(seed byte) nostr.PubKey {
 		pubkey[i] = seed
 	}
 	return pubkey
+}
+
+func TestProductQueriesKeepRelayIndexesSeparate(t *testing.T) {
+	// Configure both relays before wrapping either query. Their query closures
+	// share a code pointer, but their product indexes must remain independent.
+	first, second := khatru.NewRelay(), khatru.NewRelay()
+	for _, relay := range []*khatru.Relay{first, second} {
+		store := &slicestore.SliceStore{}
+		require.NoError(t, store.Init())
+		relay.UseEventstore(store, 500)
+		ConfigureRelay(relay, Scope2Options{})
+	}
+	apple := productEventFixture(1, 1, 1000, "apple", `{"title":"Apple"}`)
+	banana := productEventFixture(2, 2, 1000, "banana", `{"title":"Banana"}`)
+	first.OnEventSaved(t.Context(), apple)
+	second.OnEventSaved(t.Context(), banana)
+	filter := nostr.Filter{Kinds: []nostr.Kind{30402}, Limit: 10, Search: "conduit-l2:q=;sort=newest"}
+	for _, tc := range []struct {
+		relay *khatru.Relay
+		want  nostr.Event
+	}{{first, apple}, {second, banana}} {
+		query := WrapProductQueries(tc.relay, tc.relay.QueryStored, Scope2Options{})
+		got := collectSeqEvents(query(t.Context(), filter))
+		require.Len(t, got, 1)
+		require.Equal(t, tc.want.ID, got[0].ID)
+	}
 }
