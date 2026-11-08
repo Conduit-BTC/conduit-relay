@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Check legacy formatting
@@ -38,7 +38,7 @@ jobs:
       CGO_ENABLED: "1"
     services:
       postgres:
-        image: postgres:17
+        image: postgres:17@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
         env:
           POSTGRES_USER: congee_ci
           POSTGRES_PASSWORD: congee_ci
@@ -54,10 +54,10 @@ jobs:
       run:
         working-directory: congee
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.27.1"
           cache-dependency-path: |
@@ -98,7 +98,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -115,8 +115,8 @@ jobs:
             git merge-base --is-ancestor HEAD origin/main
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: congee
           load: true
@@ -128,7 +128,7 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke actual production entrypoint
         run: python3 scripts/congee-smoke.py ghcr.io/conduit-btc/conduit-relay:${{ steps.version.outputs.value }}
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           registry: ghcr.io

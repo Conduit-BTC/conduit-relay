@@ -28,6 +28,14 @@ Review is maintainer-requested. There is no PR-title gate or automatic second
 review pass. Keep account credentials and review App private keys out of public
 workflows.
 
+
+CI also checks that external actions and reusable workflows use full commit SHAs,
+and workflow containers use image digests. Local composite actions are included.
+Run `ruby scripts/check-action-pins-test.rb` and `ruby scripts/check-action-pins.rb`
+to check changes locally; Ruby and its bundled YAML parser require no extra gems.
+Keep version comments beside pins for review and dependency updates. This checks
+repository-owned YAML, not runtime downloads or external actions' internals.
+
 ## Build the demo relay
 
 From this project root:
