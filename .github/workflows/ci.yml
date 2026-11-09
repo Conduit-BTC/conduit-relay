@@ -56,5 +56,5 @@ jobs:
           go test -count=1
           -run 'GiftWrap|NIP17|NIP42|NEG.*(Protected|GiftWrap|Private|Group)|EventVisib|REQPlugin'
           ./internal/relay ./internal/config ./internal/nip77/upstream
-      - name: Check legacy recipient protection and credential boundary
-        run: go test -count=1 -run 'GiftWrap|TestPublicAgentCredentialBoundary' .
+      - name: Check legacy protection, sync recovery, and credential boundary
+        run: go test -count=1 -run 'GiftWrap|TestPublicAgentCredentialBoundary|TestProjectionDelete|TestProductQueriesKeepRelayIndexesSeparate|TestRelaySyncerBackfill|TestRelaySyncerLoadStateRecovery|TestSyncStateReplacement' .

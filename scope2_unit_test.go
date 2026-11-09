@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"testing"
 
+	khatru "conduitl2/third_party/khatru"
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/slicestore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,20 +48,37 @@ func TestProjectionDeleteByEventAndAddress(t *testing.T) {
 
 	byEvent := productEventFixture(1, 9, 1000, "apple", `{"title":"Apple","summary":"fresh","price":10,"currency":"USD","updatedAt":1000}`)
 	state.applyEvent(byEvent)
-	state.applyEvent(deleteEventFixture(4, 1001, []string{byEvent.ID.Hex()}, nil))
+	state.applyEvent(deleteEventFixture(4, 9, 1001, []string{byEvent.ID.Hex()}, nil))
 	require.True(t, state.products[productAddress(byEvent)].Tombstoned)
 
 	byAddress := productEventFixture(2, 9, 1002, "banana", `{"title":"Banana","summary":"yellow","price":7,"currency":"USD","updatedAt":1002}`)
 	state.applyEvent(byAddress)
 
 	address := fmt.Sprintf("%d:%s:%s", byAddress.Kind, byAddress.PubKey.Hex(), byAddress.Tags.GetD())
-	state.applyEvent(deleteEventFixture(5, 1003, nil, []string{address}))
+	state.applyEvent(deleteEventFixture(5, 9, 1003, nil, []string{address}))
 	require.True(t, state.products[productAddress(byAddress)].Tombstoned)
 
 	revived := productEventFixture(3, 9, 1004, "banana", `{"title":"Banana","summary":"back","price":8,"currency":"USD","updatedAt":1004}`)
 	state.applyEvent(revived)
 	require.False(t, state.products[productAddress(revived)].Tombstoned)
 	require.Equal(t, revived.ID, state.products[productAddress(revived)].Event.ID)
+}
+
+func TestProjectionDeleteIgnoresForeignAuthors(t *testing.T) {
+	state := newScope2State(nil)
+
+	victim := productEventFixture(1, 9, 1000, "apple", `{"title":"Apple","summary":"fresh","price":10,"currency":"USD","updatedAt":1000}`)
+	state.applyEvent(victim)
+
+	state.applyEvent(deleteEventFixture(4, 4, 1001, []string{victim.ID.Hex()}, nil))
+	require.False(t, state.products[productAddress(victim)].Tombstoned)
+
+	address := fmt.Sprintf("%d:%s:%s", victim.Kind, victim.PubKey.Hex(), victim.Tags.GetD())
+	state.applyEvent(deleteEventFixture(5, 4, 1002, nil, []string{address}))
+	require.False(t, state.products[productAddress(victim)].Tombstoned)
+
+	state.applyEvent(deleteEventFixture(6, 9, 1003, nil, []string{address}))
+	require.True(t, state.products[productAddress(victim)].Tombstoned)
 }
 
 func TestEvaluatePriceSortUsesUpdatedAtTieBreakers(t *testing.T) {
@@ -210,7 +229,7 @@ func productEventWithTagsFixture(idSeed byte, authorSeed byte, createdAt int64, 
 	}
 }
 
-func deleteEventFixture(seed byte, createdAt int64, eventIDs []string, addresses []string) nostr.Event {
+func deleteEventFixture(seed byte, authorSeed byte, createdAt int64, eventIDs []string, addresses []string) nostr.Event {
 	tags := make(nostr.Tags, 0, len(eventIDs)+len(addresses))
 	for _, id := range eventIDs {
 		tags = append(tags, nostr.Tag{"e", id})
@@ -221,7 +240,7 @@ func deleteEventFixture(seed byte, createdAt int64, eventIDs []string, addresses
 
 	return nostr.Event{
 		ID:        mustID(seed),
-		PubKey:    mustPubKey(seed),
+		PubKey:    mustPubKey(authorSeed),
 		CreatedAt: nostr.Timestamp(createdAt),
 		Kind:      5,
 		Tags:      tags,
@@ -242,4 +261,30 @@ func mustPubKey(seed byte) nostr.PubKey {
 		pubkey[i] = seed
 	}
 	return pubkey
+}
+
+func TestProductQueriesKeepRelayIndexesSeparate(t *testing.T) {
+	// Configure both relays before wrapping either query. Their query closures
+	// share a code pointer, but their product indexes must remain independent.
+	first, second := khatru.NewRelay(), khatru.NewRelay()
+	for _, relay := range []*khatru.Relay{first, second} {
+		store := &slicestore.SliceStore{}
+		require.NoError(t, store.Init())
+		relay.UseEventstore(store, 500)
+		ConfigureRelay(relay, Scope2Options{})
+	}
+	apple := productEventFixture(1, 1, 1000, "apple", `{"title":"Apple"}`)
+	banana := productEventFixture(2, 2, 1000, "banana", `{"title":"Banana"}`)
+	first.OnEventSaved(t.Context(), apple)
+	second.OnEventSaved(t.Context(), banana)
+	filter := nostr.Filter{Kinds: []nostr.Kind{30402}, Limit: 10, Search: "conduit-l2:q=;sort=newest"}
+	for _, tc := range []struct {
+		relay *khatru.Relay
+		want  nostr.Event
+	}{{first, apple}, {second, banana}} {
+		query := WrapProductQueries(tc.relay, tc.relay.QueryStored, Scope2Options{})
+		got := collectSeqEvents(query(t.Context(), filter))
+		require.Len(t, got, 1)
+		require.Equal(t, tc.want.ID, got[0].ID)
+	}
 }

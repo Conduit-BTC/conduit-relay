@@ -21,9 +21,9 @@ func TestScope2E2E_ProductBrowseSortAndCursor(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2, MaxProjectionScan: 200})
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2})
 	base := relay.QueryStored
-	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 2})
 
 	srv := httptest.NewServer(relay)
 	defer srv.Close()
@@ -81,9 +81,9 @@ func TestScope2E2E_ProductBrowseOmitsDeletedLatestRevision(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10})
 	base := relay.QueryStored
-	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10})
 
 	srv := httptest.NewServer(relay)
 	defer srv.Close()
@@ -123,9 +123,9 @@ func TestScope2E2E_ProductBrowseSearchesAndSortsTagOnlyProducts(t *testing.T) {
 	require.NoError(t, store.Init())
 	relay.UseEventstore(store, 500)
 
-	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	ConfigureRelay(relay, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10})
 	base := relay.QueryStored
-	relay.QueryStored = WrapProductQueries(base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10, MaxProjectionScan: 200})
+	relay.QueryStored = WrapProductQueries(relay, base, Scope2Options{MaxQueryLimit: 10, DefaultQueryLimit: 10})
 
 	srv := httptest.NewServer(relay)
 	defer srv.Close()
