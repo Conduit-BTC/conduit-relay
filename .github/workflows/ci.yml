@@ -31,7 +31,7 @@ jobs:
         with:
           go-version: "1.27.1"
           cache-dependency-path: |
-            go.sum
+            legacy/go.sum
             congee/go.sum
             congee/sdk/plugin/go.sum
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -49,6 +49,7 @@ jobs:
         working-directory: congee/sdk/plugin
         run: go build ./...
       - name: Build legacy relay
+        working-directory: legacy
         run: go build ./...
       - name: Check recipient protection
         working-directory: congee
@@ -57,4 +58,5 @@ jobs:
           -run 'GiftWrap|NIP17|NIP42|NEG.*(Protected|GiftWrap|Private|Group)|EventVisib|REQPlugin'
           ./internal/relay ./internal/config ./internal/nip77/upstream
       - name: Check legacy protection, sync recovery, and credential boundary
+        working-directory: legacy
         run: go test -count=1 -run 'GiftWrap|TestPublicAgentCredentialBoundary|TestProjectionDelete|TestProductQueriesKeepRelayIndexesSeparate|TestRelaySyncerBackfill|TestRelaySyncerLoadStateRecovery|TestSyncStateReplacement' .

@@ -1,6 +1,6 @@
 # Congee source and releases
 
-The production Congee executable lives in `congee/`. The root Go module and root Dockerfile build the separate legacy relay.
+The production Congee executable lives in `congee/`. The `legacy/` module and its Dockerfile build the retired legacy relay.
 
 The first Conduit source release is `congee-v2026.09.29.1`. Keep this version pinned until a reviewed update replaces it. Do not deploy a moving `latest` tag.
 

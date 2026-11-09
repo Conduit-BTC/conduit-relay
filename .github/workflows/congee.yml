@@ -15,6 +15,9 @@ concurrency:
 jobs:
   legacy:
     name: Legacy relay full validation
+    defaults:
+      run:
+        working-directory: legacy
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -23,9 +26,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: go.mod
+          go-version-file: legacy/go.mod
+          cache-dependency-path: legacy/go.sum
       - name: Check legacy formatting
-        run: test -z "$(gofmt -l $(git ls-files '*.go' ':!:congee/**'))"
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
       - run: go vet ./...
       - run: go test -count=1 ./...
       - run: go test -race -count=1 ./...

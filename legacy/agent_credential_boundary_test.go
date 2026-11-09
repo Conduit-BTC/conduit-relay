@@ -9,7 +9,7 @@ import (
 )
 
 func TestPublicAgentCredentialBoundary(t *testing.T) {
-	const directory = ".github/workflows"
+	const directory = "../.github/workflows"
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		t.Fatal(err)
