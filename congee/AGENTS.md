@@ -31,7 +31,7 @@ See the main plan in `.cursor/plans/` and `docs/plans/` for phase-by-phase detai
 ## Languages and tooling
 
 - **Go** 1.24+
-- **Node** 24+ for the admin UI
+- **Node** 24.22.3 (pinned in the repository-root `.node-version`) for the admin UI
 - **Svelte 5** (Runes) with **shadcn-svelte** and **Tailwind CSS**
 - **Bun** ORM (`github.com/uptrace/bun`) for libSQL/PostgreSQL
 - **gobwas/ws** for WebSocket upgrades
